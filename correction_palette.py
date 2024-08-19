@@ -187,6 +187,7 @@ class EditSamplingStrategy:
                  cursor_strategy: str = 'none',
                  cursor_relax: int = 5,
                  cursor_relax_unit: str = 'characters',
+                 cursor_rep: str = 'token',
                  log_stuff: bool = False,
                  invert_case_prob: float = None,
                  postprocessor = None) :
@@ -196,6 +197,7 @@ class EditSamplingStrategy:
         self.correction_distrib = correction_distrib
         self.correction_strategy = correction_strategy
         self.cursor_strategy = cursor_strategy
+        self.cursor_rep = cursor_rep
 
         if correction_strategy == 'minimum-multiple':
             self.correct = self.correct_minimum_multiple
@@ -597,6 +599,12 @@ class EditSamplingStrategy:
         return e_str
 
     def postprocess_none(self, e_str, sentence, phrase, c_str, tok):
+        if self.cursor_rep == 'naive':
+            e_arr = e_str.split(' ')
+            cursor_loc = e_arr.index(CURSOR_TOKEN)
+            e_arr.remove(CURSOR_TOKEN)
+            e_str = ' '.join([f'Error location: {cursor_loc}', *e_arr])
+            
         input_str = f'{e_str} {TEXT_SEP_TOKEN} {phrase}'
         source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
                                 max_length=MAX_SOURCE_TOKENS)
@@ -1304,7 +1312,7 @@ sampling_strategy.strategy(
 
 save_dir = './'  # save directory for pretty much anything that is saved by this program (models, tokenizers, logs, etc.)
 models_dir = f'{save_dir}saved_models/'
-data_dir = f'{save_dir}corr_datasets_experimental/DELETION-INSERTION-MULTIPLE-REPLACEMENT-SINGLE/'
+data_dir = f'{save_dir}DELETION-INSERTION-MULTIPLE-REPLACEMENT-SINGLE/'
 
 base_model_name = "google/flan-t5-small"
 
@@ -1341,7 +1349,7 @@ def init_tokenizer() -> T5Tokenizer:
 
 tokenizer = init_tokenizer()
 datasets = {
-    'baseline': EditSamplingStrategy(correction_strategy='normal-multiple', correction_distrib=(0, 1), cursor_strategy='normal', cursor_relax=5, invert_case_prob=0.5, log_stuff=False) # baseline
+    'baseline': EditSamplingStrategy(correction_strategy='normal-multiple', correction_distrib=(0, 1), cursor_strategy='normal', cursor_relax=5, cursor_rep='naive', invert_case_prob=0.5, log_stuff=False) # baseline
 }
 
 for name, strategy in datasets.items():
@@ -1358,7 +1366,7 @@ for name, strategy in datasets.items():
           f'|--------------------------- dataset: {name} -----------------------------------|\n'
           f'|-------------------------------------------------------------------------------|\n'
           f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n')
-    for i in tqdm(range(0, len(test_dataset))):
+    for i in tqdm(range(0, len(test_dataset), 1000)):
         item = test_dataset[i]
         input_ids = item['input_ids']
         label_ids = item['labels']
