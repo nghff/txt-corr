@@ -1,4 +1,5 @@
 import ast
+import re
 import random
 from collections import defaultdict
 from typing import Dict, Optional, List, Union, Tuple, Any, Callable
@@ -26,14 +27,63 @@ elif torch.cuda.is_available():
 else:
     device = torch.device("cpu")
     print("Using CPU")
-MAX_SOURCE_TOKENS: int = 128
-MAX_NEW_TOKENS: int = 128
+MAX_SOURCE_TOKENS: int = 512
+MAX_NEW_TOKENS: int = 512
 TEXT_SEP_TOKEN: str = '<||>'
 CURSOR_TOKEN: str = '<|>'
 
 if is_torch_tpu_available(check_device=False):
     import torch_xla.core.xla_model as xm
-    import torch_xla.debug.metrics as met
+
+alphabets= "([A-Za-z])"
+prefixes = "(Mr|St|Mrs|Ms|Dr)[.]"
+suffixes = "(Inc|Ltd|Jr|Sr|Co)"
+starters = "(Mr|Mrs|Ms|Dr|Prof|Capt|Cpt|Lt|He\s|She\s|It\s|They\s|Their\s|Our\s|We\s|But\s|However\s|That\s|This\s|Wherever)"
+acronyms = "([A-Z][.][A-Z][.](?:[A-Z][.])?)"
+websites = "[.](com|net|org|io|gov|edu|me)"
+digits = "([0-9])"
+multiple_dots = r'\.{2,}'
+
+def split_into_sentences(text: str) -> list[str]:
+    """
+    Split the text into sentences.
+
+    If the text contains substrings "<prd>" or "<stop>", they would lead 
+    to incorrect splitting because they are used as markers for splitting.
+
+    :param text: text to be split into sentences
+    :type text: str
+
+    :return: list of sentences
+    :rtype: list[str]
+    """
+    text = " " + text + "  "
+    text = text.replace("\n"," ")
+    text = re.sub(prefixes,"\\1<prd>",text)
+    text = re.sub(websites,"<prd>\\1",text)
+    text = re.sub(digits + "[.]" + digits,"\\1<prd>\\2",text)
+    text = re.sub(multiple_dots, lambda match: "<prd>" * len(match.group(0)) + "<stop>", text)
+    if "Ph.D" in text: text = text.replace("Ph.D.","Ph<prd>D<prd>")
+    text = re.sub("\s" + alphabets + "[.] "," \\1<prd> ",text)
+    text = re.sub(acronyms+" "+starters,"\\1<stop> \\2",text)
+    text = re.sub(alphabets + "[.]" + alphabets + "[.]" + alphabets + "[.]","\\1<prd>\\2<prd>\\3<prd>",text)
+    text = re.sub(alphabets + "[.]" + alphabets + "[.]","\\1<prd>\\2<prd>",text)
+    text = re.sub(" "+suffixes+"[.] "+starters," \\1<stop> \\2",text)
+    text = re.sub(" "+suffixes+"[.]"," \\1<prd>",text)
+    text = re.sub(" " + alphabets + "[.]"," \\1<prd>",text)
+    if "”" in text: text = text.replace(".”","”.")
+    if "\"" in text: text = text.replace(".\"","\".")
+    if "!" in text: text = text.replace("!\"","\"!")
+    if "?" in text: text = text.replace("?\"","\"?")
+    text = text.replace(".",".<stop>")
+    text = text.replace("?","?<stop>")
+    text = text.replace("!","!<stop>")
+    text = text.replace("<prd>",".")
+    sentences = text.split("<stop>")
+    sentences = [s.strip() for s in sentences]
+    if sentences and not sentences[-1]: sentences = sentences[:-1]
+    return sentences
+
 
 def capitalize_first_letter(s: str):
     if len(s) != 0:
@@ -190,7 +240,9 @@ class EditSamplingStrategy:
                  cursor_rep: str = 'token',
                  log_stuff: bool = False,
                  invert_case_prob: float = None,
-                 postprocessor = None) :
+                 inference = False,
+                 postprocessor = None,
+                 **kwargs):
         self.log_stuff = log_stuff
         self.cursor_relax = cursor_relax
         self.invert_case_prob = invert_case_prob
@@ -230,11 +282,20 @@ class EditSamplingStrategy:
 
         if self.invert_case_prob is not None and (self.invert_case_prob < 0 or self.invert_case_prob > 1):
             raise ValueError(f"Invalid letter case inversion probability '{self.invert_case_prob}'")
-
+        
+        self.postprocesser = postprocessor
         if postprocessor is None:
-            self.postprocess = self.postprocess_none
-        elif postprocessor == "inference":
+            self.postprocess_inner = self.postprocess_none
+        elif postprocessor == 'extend-sentences':
+            self.postprocess_inner = self.postprocess_extend
+        
+        if inference:
             self.postprocess = self.postprocess_inference
+        else:
+            self.postprocess = self.postprocess_train
+
+        for attr, value in kwargs.items():
+            self.__setattr__(attr, value)
 
         self.statistics = self.EditSamplingStatistics()
 
@@ -599,18 +660,18 @@ class EditSamplingStrategy:
         return e_str
 
     def postprocess_none(self, e_str, sentence, phrase, c_str, tok):
-        if self.cursor_rep == 'naive':
-            e_arr = e_str.split(' ')
-            cursor_loc = e_arr.index(CURSOR_TOKEN)
-            e_arr.remove(CURSOR_TOKEN)
-            e_str = ' '.join([f'Error location: {cursor_loc}', *e_arr])
-            
         input_str = f'{e_str} {TEXT_SEP_TOKEN} {phrase}'
         source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
                                 max_length=MAX_SOURCE_TOKENS)
 
         label = tok(c_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
 
+        if self.cursor_rep == 'naive':
+            input_arr = input_str.split(' ')
+            cursor_loc = input_arr.index(CURSOR_TOKEN)
+            input_arr.remove(CURSOR_TOKEN)
+            input_str = ' '.join([f'Error location: {cursor_loc}', *input_arr])
+        
         item = {
             "input_ids": source['input_ids'].squeeze(),
             "labels": label['input_ids'].squeeze(),
@@ -626,8 +687,74 @@ class EditSamplingStrategy:
                           item["labels"]]  # we do not wish to include pad tokens when calculating loss
         return item
 
-    def postprocess_inference(self, e_str, sentence, phrase, c_str, tok):
-        item = self.postprocess_none(e_str, sentence, phrase, c_str, tok)
+    def postprocess_extend(self, e_str, sentence, phrase, c_str, tok, **kwargs):
+        if not hasattr(self, 'extension_strategy'):
+            raise ValueError('no sentence extension strategy provided for postprocess_extend')
+
+        sentences_before = kwargs['sentences_before']
+        sentences_after = kwargs['sentences_after']
+        sentences_before = split_into_sentences(sentences_before)
+        sentences_after = split_into_sentences(sentences_after)
+
+        n_before = 0
+        n_after = 0
+        if self.extension_strategy == 'random':
+            n_before = random.randint(0, len(sentences_after))
+            n_after = random.randint(0, len(sentences_after))
+        elif self.extension_strategy == 'left-random':
+            if hasattr(self, 'left_ext_max'):
+                left_ext_max = self.left_ext_max
+            else:
+                left_ext_max = len(sentences_before)
+            n_before = random.randint(0, left_ext_max)
+            n_after = len(sentences_after)
+        else:
+            raise ValueError('invalid extension_strategy')
+
+        sentences_before = ' '.join(sentences_before[-n_before:]) if n_before != 0 else ''
+        sentences_after = ' '.join(sentences_after[:n_after])
+
+        input_str = e_str
+        input_str = f'{sentences_before} {input_str} {sentences_after}'
+        if 'extend_label' in kwargs and kwargs['extend_label']:
+            label_str = f'{sentences_before} {c_str} {sentences_after}'
+        else:
+            label_str = f'{c_str}'
+        
+
+        input_str = f'{input_str} {TEXT_SEP_TOKEN} {phrase}'
+        
+        if self.cursor_rep == 'naive':
+            input_arr = input_str.split(' ')
+            cursor_loc = input_arr.index(CURSOR_TOKEN)
+            input_arr.remove(CURSOR_TOKEN)
+            input_str = ' '.join([f'Error location: {cursor_loc}', *input_arr])
+
+        source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
+                                max_length=MAX_SOURCE_TOKENS)
+
+        label = tok(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
+
+        item = {
+            "input_ids": source['input_ids'].squeeze(),
+            "labels": label['input_ids'].squeeze(),
+
+            "attention_mask": source['attention_mask'].squeeze(),
+            "decoder_attention_mask": label['attention_mask'].squeeze(),
+
+            "input_str": input_str,
+            "label_str": label_str
+        }
+
+        item["labels"] = [-100 if token == tok.pad_token_id else token for token in
+                          item["labels"]]  # we do not wish to include pad tokens when calculating loss
+        return item
+
+    def postprocess_train(self, e_str, sentence, phrase, c_str, tok, **kwargs):
+        return self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
+
+    def postprocess_inference(self, e_str, sentence, phrase, c_str, tok, **kwargs):
+        item = self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
         item['sentence'] = sentence
         item['part'] = phrase
         return item
@@ -712,10 +839,11 @@ class EditSamplingStrategy:
                 self.statistics.num_inversions += 1
 
         self.statistics.word_count_histograms['phrases'][len(i_phrase.split(' '))] += 1
+
         return i_sentence, sentence, i_phrase, l_sentence
 
-    def __call__(self, e_str, t_str, edits, tok, inference=False, **kwargs):
-        return self.postprocess(*self.strategy(e_str, t_str, edits, **kwargs), tok)
+    def __call__(self, e_str, t_str, edits, tok, **kwargs):
+        return self.postprocess(*self.strategy(e_str, t_str, edits, **kwargs), tok, **kwargs)
 
 
 class StaticCorrectionDatasetWithEdits(Dataset):
@@ -790,8 +918,6 @@ class CorrectionDatasetWithEdits(Dataset):
         print('sampling ... ')
         self.df = self.df.sample(frac=scale, random_state=random_state).reset_index(drop=True)
 
-        print('done')
-
         # set tokenizer
         self.tokenizer = tokenizer
         self.sampling_strategy = sampling_strategy
@@ -804,6 +930,11 @@ class CorrectionDatasetWithEdits(Dataset):
         self.dataset_mem = [] if save_dataset else None
         self.item_mem = [] if one_draw else None
 
+        self.is_extending = (sampling_strategy.postprocesser == 'extend-sentences')
+
+        print('done')
+            
+
     def __len__(self):
         return len(self.df) if self.sampling_strategy.cursor_strategy != 'edge' else len(self.df_l) + len(self.df_r)
 
@@ -813,21 +944,29 @@ class CorrectionDatasetWithEdits(Dataset):
             return self.item_mem[idx]
         
         # add item, remember item, and return item
-        if self.sampling_strategy.cursor_strategy != 'edge':
-            row = self.df.iloc[idx]
-            item = self.sampling_strategy(row['error_sentence'], row['target_sentence'], row['edits'], self.tokenizer)
-        else:
-            if idx < len(self.df_l):
+        strategy_kwargs = {}
+        if self.sampling_strategy.cursor_strategy == 'edge':
+            side='left' if idx < len(self.df_l) else 'right'
+            strategy_kwargs['side'] = side
+            if side == 'left':
                 row = self.df_l.iloc[idx]
             else:
                 row = self.df_r.iloc[idx - len(self.df_l)]
-            item = self.sampling_strategy(row['error_sentence'], row['target_sentence'], row['edits'], self.tokenizer, side='left' if idx < len(self.df_l) else 'right')
+        else:
+            row = self.df.iloc[idx]
+
+        if self.is_extending:
+            strategy_kwargs.update({'sentences_before': row['sentences_before'], 'sentences_after': row['sentences_after']})
+
+        item = self.sampling_strategy(row['error_sentence'], row['target_sentence'], row['edits'], self.tokenizer, **strategy_kwargs)
+
         if self.save_dataset:
             self.dataset_mem.append({'input': item['input_str'], 'label': item['label_str']})
         if self.one_draw:
             self.item_mem.append(item)
 
         return item
+
 
 # sequence-to-sequence trainer with early stopping
 class EarlyStoppingSeq2SeqTrainer(Seq2SeqTrainer):
@@ -1302,85 +1441,88 @@ class T5SpeechTextClassifier(nn.Module):
         else:
             return {'distributions': output_state, 'predictions': output_state.argmax(-1)}
 
-'''
-sampling_strategy = EditSamplingStrategy(correction_strategy='minimum-multiple', cursor_strategy='uniform', cursor_relax=0, log_stuff=True)
-sampling_strategy.strategy(
-    'Hi there everybody, I hopeyouallarehaving a great time',
-    'Hi there everybody, I hope you all are having a great time',
-    [((4, 5), (4, 9))])
+if __name__ == '__main__':
+    save_dir = './'  # save directory for pretty much anything that is saved by this program (models, tokenizers, logs, etc.)
+    models_dir = f'{save_dir}saved_models/'
+    data_dir = f'{save_dir}DELETION-INSERTION-MULTIPLE-REPLACEMENT-SINGLE/'
+
+    base_model_name = "google/flan-t5-small"
+
+    NUM_EPOCHS = 7  # number of epochs
+
+    TRAIN_BATCH_SIZE = 16  # batch size when training
+    VAL_BATCH_SIZE = 24  # batch size when running on validation set
+
+    LOGGING_RATE = 0.005  # if integer, log stats every LOGGING_RATE steps. if float, log stats after every LOGGING_RATE portion of the training steps
+    EVAL_RATE = 0.05  # if integer, eval every LOGGING_RATE steps. if float, eval after every LOGGING_RATE portion of the training steps
+    SAVE_RATE = 0.05
+
+    NUM_SAVES = 5
+
+    LEARNING_RATE = 5e-5  # learning rate
+    WEIGHT_DECAY = 0.001  # weight decay
+
+    PORTION = 1  # proportion of datasets to use (note: applies to each split)
+
+    custom_special_tokens_dict = {'additional_special_tokens': [CURSOR_TOKEN, TEXT_SEP_TOKEN]}
 
 
-save_dir = './'  # save directory for pretty much anything that is saved by this program (models, tokenizers, logs, etc.)
-models_dir = f'{save_dir}saved_models/'
-data_dir = f'{save_dir}DELETION-INSERTION-MULTIPLE-REPLACEMENT-SINGLE/'
-
-base_model_name = "google/flan-t5-small"
-
-NUM_EPOCHS = 7  # number of epochs
-
-TRAIN_BATCH_SIZE = 16  # batch size when training
-VAL_BATCH_SIZE = 24  # batch size when running on validation set
-
-LOGGING_RATE = 0.005  # if integer, log stats every LOGGING_RATE steps. if float, log stats after every LOGGING_RATE portion of the training steps
-EVAL_RATE = 0.05  # if integer, eval every LOGGING_RATE steps. if float, eval after every LOGGING_RATE portion of the training steps
-SAVE_RATE = 0.05
-
-NUM_SAVES = 5
-
-LEARNING_RATE = 5e-5  # learning rate
-WEIGHT_DECAY = 0.001  # weight decay
-
-PORTION = 1  # proportion of datasets to use (note: applies to each split)
-
-custom_special_tokens_dict = {'additional_special_tokens': [CURSOR_TOKEN, TEXT_SEP_TOKEN]}
+    def init_model() -> T5ForConditionalGeneration:
+        model = T5ForConditionalGeneration.from_pretrained(base_model_name)
+        model.resize_token_embeddings(new_num_tokens=len(custom_special_tokens_dict['additional_special_tokens']))
+        return T5ForConditionalGeneration.from_pretrained(base_model_name)
 
 
-def init_model() -> T5ForConditionalGeneration:
-    model = T5ForConditionalGeneration.from_pretrained(base_model_name)
-    model.resize_token_embeddings(new_num_tokens=len(custom_special_tokens_dict['additional_special_tokens']))
-    return T5ForConditionalGeneration.from_pretrained(base_model_name)
+    def init_tokenizer() -> T5Tokenizer:
+        tokenizer = T5Tokenizer.from_pretrained(base_model_name)
+        print(f"added {tokenizer.add_special_tokens(custom_special_tokens_dict)} custom special tokens to tokenizer")
+        return tokenizer
 
 
-def init_tokenizer() -> T5Tokenizer:
-    tokenizer = T5Tokenizer.from_pretrained(base_model_name)
-    print(f"added {tokenizer.add_special_tokens(custom_special_tokens_dict)} custom special tokens to tokenizer")
-    return tokenizer
+    tokenizer = init_tokenizer()
+    datasets = {
+        'extend': EditSamplingStrategy(correction_strategy='normal-multiple', 
+                                        correction_distrib=(0, 1), 
+                                        cursor_strategy='normal', 
+                                        cursor_relax=5, 
+                                        cursor_rep='token', 
+                                        invert_case_prob=0.5, 
+                                        postprocessor='extend-sentences',
+                                        extension_strategy='left-random',
+                                        left_ext_max=5,
+                                        log_stuff=False) # baseline
+    }
 
+    for name, strategy in datasets.items():
+        sampling_strategy = strategy
+        # train_dataset = CorrectionDatasetWithEdits(f'{data_dir}train_data.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
+        # val_dataset = CorrectionDatasetWithEdits(f'{data_dir}val_data.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
+        test_dataset = CorrectionDatasetWithEdits(f'{data_dir}all_data_with_context.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
 
-tokenizer = init_tokenizer()
-datasets = {
-    'baseline': EditSamplingStrategy(correction_strategy='normal-multiple', correction_distrib=(0, 1), cursor_strategy='normal', cursor_relax=5, cursor_rep='naive', invert_case_prob=0.5, log_stuff=False) # baseline
-}
-
-for name, strategy in datasets.items():
-    sampling_strategy = strategy
-    # train_dataset = CorrectionDatasetWithEdits(f'{data_dir}train_data.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
-    # val_dataset = CorrectionDatasetWithEdits(f'{data_dir}val_data.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
-    test_dataset = CorrectionDatasetWithEdits(f'{data_dir}test_data.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
-
-    print(f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n'
-          f'|-------------------------------------------------------------------------------|\n'
-          f'|-------------------------------------------------------------------------------|\n'
-          f'|--------------------------- dataset: {name} -----------------------------------|\n'
-          f'|--------------------------- dataset: {name} -----------------------------------|\n'
-          f'|--------------------------- dataset: {name} -----------------------------------|\n'
-          f'|-------------------------------------------------------------------------------|\n'
-          f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n')
-    for i in tqdm(range(0, len(test_dataset), 1000)):
-        item = test_dataset[i]
-        input_ids = item['input_ids']
-        label_ids = item['labels']
-        idx = 0
-        while input_ids[idx] != 0:
-            idx += 1
-        input_ids = input_ids[:idx]
-        idx = 0
-        while label_ids[idx] != -100:
-            idx += 1
-        label_ids = label_ids[:idx]
-        if 32100 not in input_ids or 32101 not in input_ids:
-            print('sssss')
-        print(f'input string: {tokenizer.decode(input_ids)}')
-        print(f'label string: {tokenizer.decode(label_ids)}')
-        print()
-'''
+        print(f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n'
+            f'|-------------------------------------------------------------------------------|\n'
+            f'|-------------------------------------------------------------------------------|\n'
+            f'|--------------------------- dataset: {name} -----------------------------------|\n'
+            f'|--------------------------- dataset: {name} -----------------------------------|\n'
+            f'|--------------------------- dataset: {name} -----------------------------------|\n'
+            f'|-------------------------------------------------------------------------------|\n'
+            f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n')
+        for i in tqdm(range(0, len(test_dataset), 100)):
+            item = test_dataset[i]
+            input_ids = item['input_ids']
+            label_ids = item['labels']
+            idx = 0
+            while idx < len(input_ids) and input_ids[idx] != 0:
+                idx += 1
+            input_ids = input_ids[:idx]
+            idx = 0
+            while idx < len(label_ids) and label_ids[idx] != -100:
+                idx += 1
+            label_ids = label_ids[:idx]
+            in_str = tokenizer.decode(input_ids)
+            la_str = tokenizer.decode(label_ids)
+            if TEXT_SEP_TOKEN not in in_str:
+                print('sssss')
+            print(f'input string: {in_str}')
+            print(f'label string: {la_str}')
+            print()
