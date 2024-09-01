@@ -8,7 +8,6 @@ import datasets
 import numpy as np
 import pandas as pd
 import torch.cuda
-from packaging import version
 from torch import nn, LongTensor, FloatTensor, tensor
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -661,31 +660,8 @@ class EditSamplingStrategy:
 
     def postprocess_none(self, e_str, sentence, phrase, c_str, tok):
         input_str = f'{e_str} {TEXT_SEP_TOKEN} {phrase}'
-        source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
-                                max_length=MAX_SOURCE_TOKENS)
-
-        label = tok(c_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
-
-        if self.cursor_rep == 'naive':
-            input_arr = input_str.split(' ')
-            cursor_loc = input_arr.index(CURSOR_TOKEN)
-            input_arr.remove(CURSOR_TOKEN)
-            input_str = ' '.join([f'Error location: {cursor_loc}', *input_arr])
-        
-        item = {
-            "input_ids": source['input_ids'].squeeze(),
-            "labels": label['input_ids'].squeeze(),
-
-            "attention_mask": source['attention_mask'].squeeze(),
-            "decoder_attention_mask": label['attention_mask'].squeeze(),
-
-            "input_str": input_str,
-            "label_str": c_str
-        }
-
-        item["labels"] = [-100 if token == tok.pad_token_id else token for token in
-                          item["labels"]]  # we do not wish to include pad tokens when calculating loss
-        return item
+        label_str = c_str
+        return self.apply_cursor_rep(input_str, label_str, tok)
 
     def postprocess_extend(self, e_str, sentence, phrase, c_str, tok, **kwargs):
         if not hasattr(self, 'extension_strategy'):
@@ -721,20 +697,74 @@ class EditSamplingStrategy:
         else:
             label_str = f'{c_str}'
         
-
         input_str = f'{input_str} {TEXT_SEP_TOKEN} {phrase}'
-        
+
+        return self.apply_cursor_rep(input_str, label_str, tok)
+
+    def postprocess_train(self, e_str, sentence, phrase, c_str, tok, **kwargs):
+        return self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
+
+    def postprocess_inference(self, e_str, sentence, phrase, c_str, tok, **kwargs):
+        item = self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
+        item['sentence'] = sentence
+        item['part'] = phrase
+        return item
+    
+    def apply_cursor_rep(self, input_str, label_str, tok):
         if self.cursor_rep == 'naive':
-            input_arr = input_str.split(' ')
-            cursor_loc = input_arr.index(CURSOR_TOKEN)
-            input_arr.remove(CURSOR_TOKEN)
-            input_str = ' '.join([f'Error location: {cursor_loc}', *input_arr])
+            return self.apply_naive_cursor(input_str, label_str, tok)
+        elif self.cursor_rep == 'mask':
+            return self.apply_mask_cursor(input_str, label_str, tok)
+        elif self.cursor_rep == 'token':
+            return self.apply_mask_cursor(input_str, label_str, tok)
+        else:
+            raise ValueError(f'invalid cursor representation {self.cursor_rep}')
+
+    def apply_mask_cursor(self, input_str, label_str, tok):
+        input_tokenized = tok.tokenize(input_str)
+        cursor_tok_loc = input_tokenized.index(CURSOR_TOKEN)
+
+        input_arr = input_str.split(' ')
+        input_arr.remove(CURSOR_TOKEN)
+        input_str = ' '.join(input_arr)
 
         source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
                                 max_length=MAX_SOURCE_TOKENS)
 
         label = tok(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
 
+        cursor_mask = torch.zeros(size=source['input_ids'].squeeze().size())
+        cursor_mask[cursor_tok_loc] = cursor_mask[cursor_tok_loc - 1] = 1
+
+        item = {
+            "input_ids": source['input_ids'].squeeze(),
+            "labels": label['input_ids'].squeeze(),
+
+            "attention_mask": source['attention_mask'].squeeze(),
+            "decoder_attention_mask": label['attention_mask'].squeeze(),
+            "cursor_mask": cursor_mask,
+
+            "input_str": input_str,
+            "label_str": label_str
+        }
+
+        item["labels"] = [-100 if token == tok.pad_token_id else token for token in
+                          item["labels"]]  # we do not wish to include pad tokens when calculating loss
+        return item
+
+    def apply_naive_cursor(self, input_str, label_str, tok):
+        input_arr = input_str.split(' ')
+        cursor_loc = input_arr.index(CURSOR_TOKEN)
+        input_arr.remove(CURSOR_TOKEN)
+
+        input_str = ' '.join([f'Error location: {cursor_loc}', *input_arr])
+
+        source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
+                                max_length=MAX_SOURCE_TOKENS)
+
+        label = tok(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
+        
+        
         item = {
             "input_ids": source['input_ids'].squeeze(),
             "labels": label['input_ids'].squeeze(),
@@ -749,14 +779,27 @@ class EditSamplingStrategy:
         item["labels"] = [-100 if token == tok.pad_token_id else token for token in
                           item["labels"]]  # we do not wish to include pad tokens when calculating loss
         return item
+    
+    def apply_token_cursor(self, input_str, label_str, tok):
+        source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
+                                max_length=MAX_SOURCE_TOKENS)
 
-    def postprocess_train(self, e_str, sentence, phrase, c_str, tok, **kwargs):
-        return self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
+        label = tok(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
+        
+        
+        item = {
+            "input_ids": source['input_ids'].squeeze(),
+            "labels": label['input_ids'].squeeze(),
 
-    def postprocess_inference(self, e_str, sentence, phrase, c_str, tok, **kwargs):
-        item = self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
-        item['sentence'] = sentence
-        item['part'] = phrase
+            "attention_mask": source['attention_mask'].squeeze(),
+            "decoder_attention_mask": label['attention_mask'].squeeze(),
+
+            "input_str": input_str,
+            "label_str": label_str
+        }
+
+        item["labels"] = [-100 if token == tok.pad_token_id else token for token in
+                          item["labels"]]  # we do not wish to include pad tokens when calculating loss
         return item
 
     def filter(self, df: pd.DataFrame):
@@ -1485,7 +1528,7 @@ if __name__ == '__main__':
                                         correction_distrib=(0, 1), 
                                         cursor_strategy='normal', 
                                         cursor_relax=5, 
-                                        cursor_rep='token', 
+                                        cursor_rep='mask', 
                                         invert_case_prob=0.5, 
                                         postprocessor='extend-sentences',
                                         extension_strategy='left-random',
@@ -1511,6 +1554,7 @@ if __name__ == '__main__':
             item = test_dataset[i]
             input_ids = item['input_ids']
             label_ids = item['labels']
+            cursor_mask = item['cursor_mask']
             idx = 0
             while idx < len(input_ids) and input_ids[idx] != 0:
                 idx += 1
@@ -1525,4 +1569,5 @@ if __name__ == '__main__':
                 print('sssss')
             print(f'input string: {in_str}')
             print(f'label string: {la_str}')
+            print(f'cursor mask: {cursor_mask}')
             print()
