@@ -4,10 +4,6 @@
 /__pycache__
 /wandb
 /.vscode
-<<<<<<< HEAD
-/saved_models/ft5\ usm
-=======
 /saved_models/
 /DELETION-INSERTION-MULTIPLE-REPLACEMENT-SINGLE
 !/saved_models/pretrained
->>>>>>> ee46daf (more fixes for cursor_t5_modeling; support for training with cursor encoding)
