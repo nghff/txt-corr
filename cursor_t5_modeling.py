@@ -770,13 +770,25 @@ class CursorT5Attention(T5Attention):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
 
+    def compute_cursor_bias(self, cursor_mask):
+        """Compute cursor_bias"""
+        B, T = cursor_mask.size()
+        indices = cursor_mask.argmax(dim=1)
+        rows = torch.arange(B).unsqueeze(1)
+        cols = indices.unsqueeze(1)
+
+        cursor_bias = torch.zeros(B, T, T)
+        cursor_bias[rows, cols, :] = 1
+        cursor_bias[rows, :, cols] = 1
+        return cursor_bias
+
     def forward(
             self,
             hidden_states,
             mask=None,
             key_value_states=None,
             position_bias=None,
-            cursor_bias=None,  # Added parameter for cursor bias with dimensions B x T
+            cursor_mask=None,  # Added parameter for cursor bias with dimensions B x T
             past_key_value=None,
             layer_head_mask=None,
             query_length=None,
@@ -871,44 +883,25 @@ class CursorT5Attention(T5Attention):
             if mask is not None:
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
+        cursor_bias = None
+        if cursor_mask:
+            cursor_bias = self.compute_cursor_bias(cursor_mask)
+
         if self.pruned_heads:
             mask = torch.ones(position_bias.shape[1])
             mask[list(self.pruned_heads)] = 0
 
-            # Start of Henry edit: Add cursor bias mask
             if cursor_bias:
-                B, T = cursor_bias.size()
-                indices = cursor_bias.argmax(dim=1)
-                rows = torch.arange(B).unsqueeze(1)
-                cols = indices.unsqueeze(1)
+                position_bias = cursor_bias + position_bias
 
-                cursor_bias = torch.zeros(B, T, T)
-                cursor_bias[rows, cols, :] = 1
-                cursor_bias[rows, :, cols] = 1
-                combined_bias = cursor_bias + position_bias
-                combined_bias_masked = combined_bias[:, mask.bool()]
-            else:
-                position_bias_masked = position_bias[:, mask.bool()]
+            position_bias_masked = position_bias[:, mask.bool()]
         else:
             if cursor_bias:
-                B, T = cursor_bias.size()
-                indices = cursor_bias.argmax(dim=1)
-                rows = torch.arange(B).unsqueeze(1)
-                cols = indices.unsqueeze(1)
-
-                cursor_bias_mask = torch.zeros(B, T, T)
-                cursor_bias_mask[rows, cols, :] = 1
-                cursor_bias_mask[rows, :, cols] = 1
-
-                combined_bias_masked = cursor_bias_mask + position_bias
+                position_bias_masked = cursor_bias + position_bias
             else:
                 position_bias_masked = position_bias
 
-        if cursor_bias:
-            scores += combined_bias_masked
-        else:
-            scores += position_bias_masked
-        # End of Henry edit
+        scores += position_bias_masked
 
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
             scores
