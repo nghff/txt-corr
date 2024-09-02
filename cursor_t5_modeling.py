@@ -770,16 +770,21 @@ class CursorT5Attention(T5Attention):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
 
-    def compute_cursor_bias(self, cursor_mask):
+    def compute_cursor_bias(self, cursor_mask, device=None):
         """Compute cursor_bias"""
+        if device is None:
+            device = self.relative_attention_bias.weight.device
+
         B, T = cursor_mask.size()
         indices = cursor_mask.argmax(dim=1)
         rows = torch.arange(B).unsqueeze(1)
         cols = indices.unsqueeze(1)
 
-        cursor_bias = torch.zeros(B, T, T)
+        cursor_bias = torch.zeros(B, T, T, device=device)
         cursor_bias[rows, cols, :] = 1
         cursor_bias[rows, :, cols] = 1
+        cursor_bias = torch.stack([cursor_bias for i in range(self.n_heads)], dim=1)
+        cursor_bias = cursor_bias
         return cursor_bias
 
     def forward(
@@ -884,19 +889,19 @@ class CursorT5Attention(T5Attention):
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
         cursor_bias = None
-        if cursor_mask:
-            cursor_bias = self.compute_cursor_bias(cursor_mask)
+        if cursor_mask is not None:
+            cursor_bias = self.compute_cursor_bias(cursor_mask, device=scores.device)
 
         if self.pruned_heads:
             mask = torch.ones(position_bias.shape[1])
             mask[list(self.pruned_heads)] = 0
 
-            if cursor_bias:
+            if cursor_bias is not None:
                 position_bias = cursor_bias + position_bias
 
             position_bias_masked = position_bias[:, mask.bool()]
         else:
-            if cursor_bias:
+            if cursor_bias is not None:
                 position_bias_masked = cursor_bias + position_bias
             else:
                 position_bias_masked = position_bias
