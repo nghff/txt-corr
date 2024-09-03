@@ -12,6 +12,7 @@ from transformers.utils.model_parallel_utils import assert_device_map, get_devic
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, Seq2SeqLMOutput, BaseModelOutput
 
 
+# T5 Model Override to support cursor bias in attention
 class CursorT5ForConditionalGeneration(T5PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [
         "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
