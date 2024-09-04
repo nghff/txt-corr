@@ -770,6 +770,8 @@ class CursorT5LayerSelfAttention(nn.Module):
 class CursorT5Attention(T5Attention):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
+        self.c_amp = nn.Parameter(torch.tensor(1))
+        self.c_std = nn.Parameter(torch.tensor(1.0))
 
     def compute_cursor_bias(self, cursor_mask, device=None):
         """Compute cursor_bias"""
@@ -778,14 +780,27 @@ class CursorT5Attention(T5Attention):
 
         B, T = cursor_mask.size()
         indices = cursor_mask.argmax(dim=1)
-        rows = torch.arange(B).unsqueeze(1)
-        cols = indices.unsqueeze(1)
 
-        cursor_bias = torch.zeros(B, T, T, device=device)
-        cursor_bias[rows, cols, :] = 1
-        cursor_bias[rows, :, cols] = 1
+        x = torch.arange(T, device=device)
+        y = torch.arange(T, device=device)
+        # https://pytorch.org/docs/stable/generated/torch.meshgrid.html
+        xx, yy = torch.meshgrid(x, y, indexing='ij')
+
+        xx = xx.unsqueeze(0).expand(B, -1, -1)
+        yy = yy.unsqueeze(0).expand(B, -1, -1)
+
+        # Get the center indices for each batch
+        center_x = indices.unsqueeze(1).unsqueeze(2).expand(-1, T, T)
+        center_y = indices.unsqueeze(1).unsqueeze(2).expand(-1, T, T)
+
+        # Compute the distance of each point in the 2D grid from the center
+        distances = torch.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+
+        # Compute the 3D Gaussian PDF for each index, mean is 0
+        exponent = -0.5 * (distances / self.c_std) ** 2
+        cursor_bias = torch.exp(exponent) / (self.c_std * torch.sqrt(torch.tensor(2 * torch.pi, device=device)))
+        cursor_bias = cursor_bias * self.c_amp
         cursor_bias = torch.stack([cursor_bias for i in range(self.n_heads)], dim=1)
-        cursor_bias = cursor_bias
         return cursor_bias
 
     def forward(
