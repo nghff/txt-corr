@@ -770,7 +770,7 @@ class CursorT5LayerSelfAttention(nn.Module):
 class CursorT5Attention(T5Attention):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
-        self.c_amp = nn.Parameter(torch.tensor(1))
+        self.c_amp = nn.Parameter(torch.tensor(1.0))
         self.c_std = nn.Parameter(torch.tensor(1.0))
 
     def compute_cursor_bias(self, cursor_mask, device=None):
