@@ -716,7 +716,7 @@ class EditSamplingStrategy:
         elif self.cursor_rep == 'mask':
             return self.apply_mask_cursor(input_str, label_str, tok)
         elif self.cursor_rep == 'token':
-            return self.apply_mask_cursor(input_str, label_str, tok)
+            return self.apply_token_cursor(input_str, label_str, tok)
         else:
             raise ValueError(f'invalid cursor representation {self.cursor_rep}')
 

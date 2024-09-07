@@ -11,6 +11,23 @@ from transformers.models.t5.modeling_t5 import (T5Attention, T5LayerFF, T5Config
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, Seq2SeqLMOutput, BaseModelOutput
 
+cursor_embedding_method = None
+possible_embedding_methods = [
+    'cross-masked uniform learnable',
+    'cross-masked gaussian learnable',
+    'unmasked gaussian learnable',
+    'point-masked learnable'
+]
+
+def set_cursor_embedding(new_embedding_method: str):
+    global cursor_embedding_method
+    new_embedding_method = new_embedding_method.lower()
+    if new_embedding_method not in possible_embedding_methods:
+        raise ValueError(f"cursor embedding method {cursor_embedding_method} is nonexistent")
+    
+    cursor_embedding_method = new_embedding_method
+    return True
+
 
 # T5 Model Override to support cursor bias in attention
 class CursorT5ForConditionalGeneration(T5PreTrainedModel):
@@ -770,16 +787,36 @@ class CursorT5LayerSelfAttention(nn.Module):
 class CursorT5Attention(T5Attention):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
-        self.c_amp = nn.Parameter(torch.tensor(1.0))
-        self.c_std = nn.Parameter(torch.tensor(1.0))
-
-    def compute_cursor_bias(self, cursor_mask, device=None):
-        """Compute cursor_bias"""
-        if device is None:
-            device = self.relative_attention_bias.weight.device
-
+        self.cursor_embedding_method = cursor_embedding_method
+        if self.cursor_embedding_method == 'cross-masked uniform learnable':
+            self.cursor_embedding_magnitudes = nn.Parameter(data=torch.ones(size=(self.n_heads,)).view(self.n_heads, 1))
+            self.compute_cursor_bias_ = self.ccb_cross_uniform_learnable
+        elif self.cursor_embedding_method == 'cross-masked gaussian learnable':
+            self.cursor_embedding_magnitudes = nn.Parameter(data=torch.ones(size=(self.n_heads,)).view(1, self.n_heads, 1, 1))
+            self.cursor_embedding_stdev = nn.Parameter(data=torch.ones(size=(self.n_heads,)).view(1, self.n_heads, 1, 1))
+            self.compute_cursor_bias_ = self.ccb_cross_gaussian_learnable
+        elif self.cursor_embedding_method == 'unmasked gaussian learnable':
+            self.cursor_embedding_magnitudes = nn.Parameter(data=torch.ones(size=(self.n_heads,)).view(1, self.n_heads, 1, 1))
+            self.cursor_embedding_stdev = nn.Parameter(data=torch.ones(size=(self.n_heads,)).view(1, self.n_heads, 1, 1))
+            self.compute_cursor_bias_ = self.ccb_gaussian_learnable
+        elif self.cursor_embedding_method == 'point-masked learnable':
+            self.cursor_embedding_magnitudes = nn.Parameter(data=torch.ones(size=(self.n_heads,)).view(1, self.n_heads, 1, 1))
+            self.compute_cursor_bias_ = self.ccb_point_learnable
+    
+    def ccb_gaussian_learnable(self, cursor_mask, device, log=False):
+        if log:
+            print(f'in gaussian')
         B, T = cursor_mask.size()
-        indices = cursor_mask.argmax(dim=1)
+        
+        mean_indices = []
+        for row in cursor_mask:
+            indices = torch.arange(row.size(0), dtype=torch.float)[row]
+            mean_index = indices.mean().item() 
+            mean_indices.append(mean_index)
+
+        mean_indices = torch.tensor(mean_indices)
+        if log:
+            print(mean_indices)
 
         x = torch.arange(T, device=device)
         y = torch.arange(T, device=device)
@@ -789,19 +826,34 @@ class CursorT5Attention(T5Attention):
         xx = xx.unsqueeze(0).expand(B, -1, -1)
         yy = yy.unsqueeze(0).expand(B, -1, -1)
 
-        # Get the center indices for each batch
-        center_x = indices.unsqueeze(1).unsqueeze(2).expand(-1, T, T)
-        center_y = indices.unsqueeze(1).unsqueeze(2).expand(-1, T, T)
+        # get the center indices for each batch
+        center_x = mean_indices.unsqueeze(1).unsqueeze(2).expand(-1, T, T)
+        center_y = mean_indices.unsqueeze(1).unsqueeze(2).expand(-1, T, T)
 
-        # Compute the distance of each point in the 2D grid from the center
+        # compute the distance of each point in the 2D grid from the center
         distances = torch.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+        distances = distances.unsqueeze(1).repeat(repeats=(1, self.n_heads, 1, 1)) # B, H, T, T
+        if log:
+            print(f'distance size: {distances.size()}')
 
-        # Compute the 3D Gaussian PDF for each index, mean is 0
-        exponent = -0.5 * (distances / self.c_std) ** 2
-        cursor_bias = torch.exp(exponent) / (self.c_std * torch.sqrt(torch.tensor(2 * torch.pi, device=device)))
-        cursor_bias = cursor_bias * self.c_amp
-        cursor_bias = torch.stack([cursor_bias for i in range(self.n_heads)], dim=1)
+        # compute the 3D Gaussian PDF for each index, mean is 0
+        exponent = -0.5 * (distances / self.cursor_embedding_stdev) ** 2 # B, H, T, T
+        if log: 
+            print(f'exponent size: {exponent.size()}')
+        
+        cursor_bias = torch.exp(exponent) / (self.cursor_embedding_stdev * torch.sqrt(torch.tensor(2 * torch.pi, device=device)))
+        cursor_bias = cursor_bias * self.cursor_embedding_magnitudes
+        if log:
+            print(f'final bias size: {cursor_bias.size()}')
+            print(cursor_bias[0, 0, mean_indices[0].int() - 3: mean_indices[0].int() + 3, mean_indices[0].int() - 3: mean_indices[0].int() + 3])
         return cursor_bias
+    
+    def compute_cursor_bias(self, cursor_mask, device=None):
+        """Compute cursor_bias"""
+        if device is None:
+            device = self.relative_attention_bias.weight.device
+
+        return self.compute_cursor_bias_(cursor_mask, device)
 
     def forward(
             self,
@@ -944,3 +996,14 @@ class CursorT5Attention(T5Attention):
         if output_attentions:
             outputs = outputs + (attn_weights,)
         return outputs
+
+
+set_cursor_embedding('unmasked gaussian learnable')
+
+model = CursorT5ForConditionalGeneration.from_pretrained('google/flan-t5-small')
+
+dummy_input = torch.randint(0, 32100, size=(4, 32), dtype=torch.long)
+dummy_decoder_input = torch.zeros(size=(4, 32), dtype=torch.long)
+dummy_cursor_mask = torch.randint(low=0, high=2, size=(4, 32), dtype=torch.long)
+output = model(**{'input_ids': dummy_input, 'decoder_input_ids': dummy_decoder_input, 'cursor_mask': dummy_cursor_mask})
+print(output.logits.size())
