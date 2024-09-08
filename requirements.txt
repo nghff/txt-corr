@@ -1,0 +1,10 @@
+numpy==1.26.4
+transformers==4.36.2
+wandb==0.17.1
+accelerate==0.31.0
+rouge_score==0.1.2
+sacrebleu==2.4.2
+sentencepiece==0.1.99
+evaluate==0.4.2
+nltk==3.8.1
+jiwer==3.0.4
