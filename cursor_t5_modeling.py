@@ -1065,10 +1065,11 @@ class CursorT5Attention(T5Attention):
             outputs = outputs + (attn_weights,)
         return outputs
 
-model = CursorT5ForConditionalGeneration.from_pretrained('google/flan-t5-small')
+if __name__ == '__main__':
+    model = CursorT5ForConditionalGeneration.from_pretrained('google/flan-t5-small','cross-masked-uniform')
 
-dummy_input = torch.randint(0, 32100, size=(4, 32), dtype=torch.long)
-dummy_decoder_input = torch.zeros(size=(4, 32), dtype=torch.long)
-dummy_cursor_mask = torch.randint(low=0, high=2, size=(4, 32), dtype=torch.long)
-output = model(**{'input_ids': dummy_input, 'decoder_input_ids': dummy_decoder_input, 'cursor_mask': dummy_cursor_mask})
-print(output.logits.size())
+    dummy_input = torch.randint(0, 32100, size=(4, 32), dtype=torch.long)
+    dummy_decoder_input = torch.zeros(size=(4, 32), dtype=torch.long)
+    dummy_cursor_mask = torch.randint(low=0, high=2, size=(4, 32), dtype=torch.long)
+    output = model(**{'input_ids': dummy_input, 'decoder_input_ids': dummy_decoder_input, 'cursor_mask': dummy_cursor_mask})
+    print(output.logits.size())
