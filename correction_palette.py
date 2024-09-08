@@ -283,7 +283,7 @@ class EditSamplingStrategy:
             raise ValueError(f"Invalid letter case inversion probability '{self.invert_case_prob}'")
         
         self.postprocesser = postprocessor
-        if postprocessor is None:
+        if postprocessor is None or postprocessor == 'none':
             self.postprocess_inner = self.postprocess_none
         elif postprocessor == 'extend-sentences':
             self.postprocess_inner = self.postprocess_extend

@@ -698,6 +698,7 @@ class CursorT5Stack(T5PreTrainedModel):
             attentions=all_attentions,
             cross_attentions=all_cross_attentions,
         )
+
 class CursorT5LayerCrossAttention(nn.Module):
     def __init__(self, config,  cursor_bias_type):
         super().__init__()
@@ -734,6 +735,7 @@ class CursorT5LayerCrossAttention(nn.Module):
         layer_output = hidden_states + self.dropout(attention_output[0])
         outputs = (layer_output,) + attention_output[1:]  # add attentions if we output them
         return outputs
+
 class CursorT5LayerSelfAttention(nn.Module):
     def __init__(self, config,  cursor_bias_type, has_relative_attention_bias=False):
         super().__init__()
@@ -767,16 +769,20 @@ class CursorT5LayerSelfAttention(nn.Module):
         outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them
         return outputs
 
+class CursorBias(nn.Module):
+    def __init__(self):
+        super().__init__()
 
-class CursorBias:
     def compute_bias(self, cursor_mask, device):
         pass
+
 class CrossUniformCursorBias(CursorBias):
     def __init__(self, n_heads):
         super().__init__()
         self.n_heads = n_heads
         self.cursor_embedding_magnitudes = nn.Parameter(
             data=torch.ones(size=(self.n_heads,)).view(1, self.n_heads, 1, 1))
+
     def compute_bias(self, cursor_mask, device):
         bool_mask = cursor_mask.bool()
         # combine row and col masks to for a cross
@@ -833,8 +839,6 @@ class CrossGaussCursorBias(CursorBias):
         masked_cursor_bias = cursor_bias * cross_mask
         final_bias = masked_cursor_bias * self.cursor_embedding_magnitudes
         return final_bias
-
-
 
 class GaussCursorBias(CursorBias):
     def __init__(self, n_heads):
@@ -1023,7 +1027,7 @@ class CursorT5Attention(T5Attention):
             if mask is not None:
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
-        cursor_bias = torch.zeros(position_bias.shape, dtype=scores.dtype)
+        cursor_bias = torch.zeros(position_bias.shape, dtype=scores.dtype, device=scores.device)
         if cursor_mask is not None:
             cursor_bias = self.cursor_bias.compute_bias(cursor_mask, scores.device)
             # cursor_bias = self.compute_cursor_bias(cursor_mask, cursor_bias_type=cursor_bias_type, device=scores.device)
