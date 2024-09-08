@@ -1025,22 +1025,17 @@ class CursorT5Attention(T5Attention):
 
         cursor_bias = torch.zeros(position_bias.shape, dtype=scores.dtype)
         if cursor_mask is not None:
-            self.cursor_bias.compute_bias(cursor_mask, scores.device)
+            cursor_bias = self.cursor_bias.compute_bias(cursor_mask, scores.device)
             # cursor_bias = self.compute_cursor_bias(cursor_mask, cursor_bias_type=cursor_bias_type, device=scores.device)
 
         if self.pruned_heads:
             mask = torch.ones(position_bias.shape[1])
             mask[list(self.pruned_heads)] = 0
-
-            if cursor_bias is not None:
-                position_bias = cursor_bias + position_bias
+            position_bias = cursor_bias + position_bias
 
             position_bias_masked = position_bias[:, mask.bool()]
         else:
-            if cursor_bias is not None:
-                position_bias_masked = cursor_bias + position_bias
-            else:
-                position_bias_masked = position_bias
+            position_bias_masked = cursor_bias + position_bias
 
         scores += position_bias_masked
 
