@@ -806,7 +806,7 @@ class CrossGaussCursorBias(CursorBias):
     def compute_bias(self, cursor_mask, device):
         B, T = cursor_mask.size()
         bool_mask = cursor_mask.bool()
-        indices = torch.arange(T, dtype=torch.float)
+        indices = torch.arange(T, dtype=torch.float, device=device)
         masked_indices = cursor_mask * indices.unsqueeze(0)
         num_ones_per_row = cursor_mask.sum(dim=1)
         num_ones_per_row = torch.clamp(num_ones_per_row, min=1)
@@ -851,7 +851,7 @@ class GaussCursorBias(CursorBias):
             print(f'in gaussian')
         B, T = cursor_mask.size()
 
-        indices = torch.arange(T, dtype=torch.float)
+        indices = torch.arange(T, dtype=torch.float, device=device)
         masked_indices = cursor_mask * indices.unsqueeze(0)
         num_ones_per_row = cursor_mask.sum(dim=1)
         num_ones_per_row = torch.clamp(num_ones_per_row, min=1)
@@ -900,12 +900,11 @@ class PointCursorBias(CursorBias):
         self.cursor_embedding_magnitudes = nn.Parameter(data=torch.ones(size=(self.n_heads,)).view(1, self.n_heads, 1, 1))
     def compute_bias(self, cursor_mask, device):
         B, T = cursor_mask.size()
-        bool_mask = cursor_mask.bool()
 
         point_mask = torch.zeros((B, T, T), device=device)
 
         row_indices = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
-        point_mask[torch.arange(B).unsqueeze(1), row_indices, row_indices] = bool_mask
+        point_mask[torch.arange(B, device=device).unsqueeze(1), row_indices, row_indices] = cursor_mask
         point_mask = point_mask.unsqueeze(1).expand(-1, self.n_heads, -1, -1)  # Shape: (B, n_heads, T, T)
 
         final_bias = point_mask * self.cursor_embedding_magnitudes

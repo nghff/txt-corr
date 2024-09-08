@@ -531,6 +531,17 @@ parameters_dict_ablation = {
             # {'correction_strategy': 'normal-multiple', 'correction_distrib': (0, 1), 'cursor_strategy': 'normal', 'cursor_relax': 5, 'invert_case_prob': 0.5, 'log_stuff': False}),
             #('x-large', 'google/flan-t5-xl',
             # {'correction_strategy': 'normal-multiple', 'correction_distrib': (0, 1), 'cursor_strategy': 'normal', 'cursor_relax': 5, 'invert_case_prob': 0.5, 'log_stuff': False})
+            ('cursor_mask point', base_model_name,
+             {'correction_strategy': 'normal-multiple',
+              'correction_distrib': (0, 1),
+              'cursor_strategy': 'normal',
+              'cursor_bias_type': 'point',
+              'cursor_relax': 5,
+              'cursor_rep': 'mask',
+              'postprocessor': 'none',
+              'invert_case_prob': 0.5,
+              'log_stuff': False}
+            ),
             ('cursor_mask cross-masked-uniform', base_model_name,
              {'correction_strategy': 'normal-multiple', 
               'correction_distrib': (0, 1), 
@@ -540,6 +551,28 @@ parameters_dict_ablation = {
               'cursor_rep': 'mask', 
               'postprocessor': 'none', 
               'invert_case_prob': 0.5, 
+              'log_stuff': False}
+            ),
+            ('cursor_mask cross-masked-gaussian', base_model_name,
+             {'correction_strategy': 'normal-multiple',
+              'correction_distrib': (0, 1),
+              'cursor_strategy': 'normal',
+              'cursor_bias_type': 'cross-masked-gaussian',
+              'cursor_relax': 5,
+              'cursor_rep': 'mask',
+              'postprocessor': 'none',
+              'invert_case_prob': 0.5,
+              'log_stuff': False}
+            ),
+            ('cursor_mask gaussian', base_model_name,
+             {'correction_strategy': 'normal-multiple',
+              'correction_distrib': (0, 1),
+              'cursor_strategy': 'normal',
+              'cursor_bias_type': 'gaussian',
+              'cursor_relax': 5,
+              'cursor_rep': 'mask',
+              'postprocessor': 'none',
+              'invert_case_prob': 0.5,
               'log_stuff': False}
             )
         ]
