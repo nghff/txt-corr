@@ -663,21 +663,21 @@ def train(config=None):
                                                    sampling_strategy=train_sampling_strategy,
                                                    scale=PORTION,
                                                    random_state=random_seed,
-                                                   save_dataset=True,
+                                                   save_dataset=False,
                                                    one_draw=False)
         val_dataset = CorrectionDatasetWithEdits(f'{data_dir}val_data.csv',
                                                  tokenizer=tokenizer,
                                                  sampling_strategy=val_sampling_strategy,
                                                  scale=PORTION,
                                                  random_state=random_seed,
-                                                 save_dataset=True,
+                                                 save_dataset=False,
                                                  one_draw=True)
         test_dataset = CorrectionDatasetWithEdits(f'{data_dir}test_data.csv',
                                                   tokenizer=tokenizer,
                                                   sampling_strategy=test_sampling_strategy,
                                                   scale=PORTION,
                                                   random_state=random_seed,
-                                                  save_dataset=True,
+                                                  save_dataset=False,
                                                   one_draw=True)
         ex_train_sample = train_dataset[0]
         ex_train_input = ex_train_sample['input_str']
@@ -763,16 +763,7 @@ def train(config=None):
         test_evaluation_df = pd.DataFrame(data=[test_evaluation], columns=test_evaluation.keys())
         test_evaluation_df.to_csv(f'{model_path}/test_results.csv', index=False)
 
-        print(f"saved best checkpoint: {trainer.state.best_model_checkpoint.split('/')[-1]}")
-
-        train_dataset_df = pd.DataFrame(data=train_dataset.dataset_mem, columns=['input', 'label'])
-        train_dataset_df.to_csv(f'{model_path}/train_dataset.csv', index=False)
-
-        val_dataset_df = pd.DataFrame(data=val_dataset.dataset_mem, columns=['input', 'label'])
-        val_dataset_df.to_csv(f'{model_path}/val_dataset.csv', index=False)
-
-        test_dataset_df = pd.DataFrame(data=test_dataset.dataset_mem, columns=['input', 'label'])
-        test_dataset_df.to_csv(f'{model_path}/test_dataset.csv', index=False)
+        print(f"Best checkpoint: {trainer.state.best_model_checkpoint.split('/')[-1]}")
 
 
 # ## Train agent
