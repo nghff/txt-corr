@@ -922,6 +922,8 @@ class CursorT5Attention(T5Attention):
             self.cursor_bias = GaussCursorBias(self.n_heads)
         elif cursor_bias_type == 'point':
             self.cursor_bias = PointCursorBias(self.n_heads)
+        elif cursor_bias_type is None:
+            self.cursor_bias = None
         else:
             raise Exception("cursor bias type not supported")
 
@@ -1064,7 +1066,14 @@ class CursorT5Attention(T5Attention):
         return outputs
 
 if __name__ == '__main__':
-    model = CursorT5ForConditionalGeneration.from_pretrained('google/flan-t5-small','cross-masked-uniform')
+    model = CursorT5ForConditionalGeneration.from_pretrained('google/flan-t5-small', None)
+
+    dummy_input = torch.randint(0, 32100, size=(4, 32), dtype=torch.long)
+    dummy_decoder_input = torch.zeros(size=(4, 32), dtype=torch.long)
+    output = model(**{'input_ids': dummy_input, 'decoder_input_ids': dummy_decoder_input})
+    print(output.logits.size())
+
+    model = CursorT5ForConditionalGeneration.from_pretrained('google/flan-t5-small', 'cross-masked-uniform')
 
     dummy_input = torch.randint(0, 32100, size=(4, 32), dtype=torch.long)
     dummy_decoder_input = torch.zeros(size=(4, 32), dtype=torch.long)

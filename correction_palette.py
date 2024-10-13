@@ -11,7 +11,7 @@ import torch.cuda
 from torch import nn, LongTensor, FloatTensor, tensor
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from transformers import Seq2SeqTrainer, T5EncoderModel, T5ForConditionalGeneration, T5Tokenizer
+from transformers import Seq2SeqTrainer, T5EncoderModel, T5ForConditionalGeneration, T5Tokenizer, T5TokenizerFast
 from transformers.trainer_pt_utils import *
 from tqdm import tqdm
 from transformers.deepspeed import is_deepspeed_zero3_enabled, deepspeed_init
@@ -263,17 +263,20 @@ class EditSamplingStrategy:
         else:
             raise ValueError(f"Invalid correction_strategy '{correction_strategy}'")
 
-        if cursor_strategy == 'uniform':
-            self.add_cursor = self.add_cursor_uniform
+        if self.cursor_rep is None or self.cursor_rep == 'none':
+            self.get_cursor = self.get_cursor_none
+        elif cursor_strategy == 'uniform':
+            self.get_cursor = self.get_cursor_uniform
         elif cursor_strategy == 'normal':
-            self.add_cursor = self.add_cursor_normal
+            self.get_cursor = self.get_cursor_normal
         elif cursor_strategy == 'none' or cursor_strategy is None:
-            self.add_cursor = self.add_cursor_none
+            self.get_cursor = self.get_cursor_none
+            self.cursor_rep = None
         elif cursor_strategy == 'edge':
             pass
         else:
             raise ValueError(f"Invalid cursor_strategy '{cursor_strategy}'")
-
+    
         if cursor_relax_unit in ['characters', 'words']:
             self.cursor_relax_unit = cursor_relax_unit
         else:
@@ -472,10 +475,10 @@ class EditSamplingStrategy:
         return ' '.join(c_arr), phrase, edits_made
 
     # no cursor will be added
-    def add_cursor_none(self, e_arr, edits_made):
-        return ' '.join(e_arr)
+    def get_cursor_none(self, e_arr, edits_made):
+        return None
 
-    def add_cursor_left(self, e_arr, edits_made):
+    def get_cursor_left(self, e_arr, edits_made):
         e_str = " ".join(e_arr)
 
         # choose random applied edit and get the start&end of its error
@@ -492,34 +495,11 @@ class EditSamplingStrategy:
             str_l = sum(len(word) + 1 for word in e_arr[:e_left])
             left_b = min(len(e_str), max(0, str_l - self.cursor_relax))
 
-        rand_loc = left_b
+        cursor_cid = left_b
 
-        # snap to nearest space
-        space_l = rand_loc
-        if space_l >= len(e_str) and self.log_stuff:
-            print('space_l >= len(e_str)')
-        while space_l != -1 and space_l < len(e_str) and e_str[space_l] != ' ':
-            space_l -= 1
+        return cursor_cid
 
-        space_r = rand_loc
-        if space_r > len(e_str) and self.log_stuff:
-            print('space_r > len(e_str)')
-        if space_r < 0 and self.log_stuff:
-            print('space_r < 0')
-        while space_r != len(e_str) and e_str[space_r] != ' ':
-            space_r += 1
-
-        sdist_l, sdist_r = rand_loc - space_l, space_r - rand_loc
-        if sdist_r < sdist_l:
-            e_str = f'{e_str[0:space_r]} {CURSOR_TOKEN}{e_str[space_r:]}'
-        else:
-            if space_l == -1:
-                e_str = f'{CURSOR_TOKEN} {e_str}'
-            else:
-                e_str = f'{e_str[0:space_l]} {CURSOR_TOKEN}{e_str[space_l:]}'
-        return e_str
-
-    def add_cursor_right(self, e_arr, edits_made):
+    def get_cursor_right(self, e_arr, edits_made):
         e_str = " ".join(e_arr)
 
         # choose random applied edit and get the start&end of its error
@@ -536,36 +516,13 @@ class EditSamplingStrategy:
             str_r = sum(len(word) + 1 for word in e_arr[:e_right]) - 1
             right_b = min(len(e_str), str_r + self.cursor_relax)
 
-        rand_loc = right_b
+        cursor_cid = right_b
 
-        # snap to nearest space
-        space_l = rand_loc
-        if space_l >= len(e_str) and self.log_stuff:
-            print('space_l >= len(e_str)')
-        while space_l != -1 and space_l < len(e_str) and e_str[space_l] != ' ':
-            space_l -= 1
-
-        space_r = rand_loc
-        if space_r > len(e_str) and self.log_stuff:
-            print('space_r > len(e_str)')
-        if space_r < 0 and self.log_stuff:
-            print('space_r < 0')
-        while space_r != len(e_str) and e_str[space_r] != ' ':
-            space_r += 1
-
-        sdist_l, sdist_r = rand_loc - space_l, space_r - rand_loc
-        if sdist_r < sdist_l:
-            e_str = f'{e_str[0:space_r]} {CURSOR_TOKEN}{e_str[space_r:]}'
-        else:
-            if space_l == -1:
-                e_str = f'{CURSOR_TOKEN} {e_str}'
-            else:
-                e_str = f'{e_str[0:space_l]} {CURSOR_TOKEN}{e_str[space_l:]}'
-        return e_str
+        return cursor_cid
 
     # - uniform probability to choose any edit that was applied
     # - uniform probability for any cursor location within an interval centered on the error of the edit chosen
-    def add_cursor_uniform(self, e_arr, edits_made):
+    def get_cursor_uniform(self, e_arr, edits_made):
         e_str = " ".join(e_arr)
 
         # choose random applied edit and get the start&end of its error
@@ -586,36 +543,13 @@ class EditSamplingStrategy:
         if left_b > right_b and self.log_stuff:
             print('left_b > right_b')
         right_b = max(left_b, right_b)
-        rand_loc = random.randint(left_b, right_b)
+        cursor_cid = random.randint(left_b, right_b)
 
-        # snap to nearest space
-        space_l = rand_loc
-        if space_l >= len(e_str) and self.log_stuff:
-            print('space_l >= len(e_str)')
-        while space_l != -1 and space_l < len(e_str) and e_str[space_l] != ' ':
-            space_l -= 1
-
-        space_r = rand_loc
-        if space_r > len(e_str) and self.log_stuff:
-            print('space_r > len(e_str)')
-        if space_r < 0 and self.log_stuff:
-            print('space_r < 0')
-        while space_r != len(e_str) and e_str[space_r] != ' ':
-            space_r += 1
-
-        sdist_l, sdist_r = rand_loc - space_l, space_r - rand_loc
-        if sdist_r < sdist_l:
-            e_str = f'{e_str[0:space_r]} {CURSOR_TOKEN}{e_str[space_r:]}'
-        else:
-            if space_l == -1:
-                e_str = f'{CURSOR_TOKEN} {e_str}'
-            else:
-                e_str = f'{e_str[0:space_l]} {CURSOR_TOKEN}{e_str[space_l:]}'
-        return e_str
+        return cursor_cid
 
     # - uniform probability to choose any edit that was applied
     # - gaussian sampling for cursor location, centered on the error of the edit chosen
-    def add_cursor_normal(self, e_arr, edits_made):
+    def get_cursor_normal(self, e_arr, edits_made):
         e_str = " ".join(e_arr)
 
         # choose random applied edit and get the start&end of its error
@@ -631,39 +565,16 @@ class EditSamplingStrategy:
             # sample cursor location
             str_l, str_r = sum(len(word) + 1 for word in e_arr[:e_left]), sum(len(word) + 1 for word in e_arr[:e_right]) - 1
             str_mid = (str_l + str_r) / 2
-            rand_loc = min(len(e_str), max(0, (int)(0.5 + random.normalvariate(str_mid, self.cursor_relax))))
+            cursor_cid = min(len(e_str), max(0, (int)(0.5 + random.normalvariate(str_mid, self.cursor_relax))))
+        
+        return cursor_cid
 
-        # snap to nearest space
-        space_l = rand_loc
-        if space_l >= len(e_str) and self.log_stuff:
-            print('space_l >= len(e_str)')
-        while space_l != -1 and space_l < len(e_str) and e_str[space_l] != ' ':
-            space_l -= 1
+    def postprocess_none(self, data_dict, tok, **kwargs):
+        data_dict['input_str'] = f"{data_dict['e_str']} {TEXT_SEP_TOKEN} {data_dict['phrase']}"
+        data_dict['label_str'] = data_dict['c_str']
+        return self.apply_cursor_rep(data_dict, tok, **kwargs)
 
-        space_r = rand_loc
-        if space_r > len(e_str) and self.log_stuff:
-            print('space_r > len(e_str)')
-        if space_r < 0 and self.log_stuff:
-            print('space_r < 0')
-        while space_r != len(e_str) and e_str[space_r] != ' ':
-            space_r += 1
-
-        sdist_l, sdist_r = rand_loc - space_l, space_r - rand_loc
-        if sdist_r < sdist_l:
-            e_str = f'{e_str[0:space_r]} {CURSOR_TOKEN}{e_str[space_r:]}'
-        else:
-            if space_l == -1:
-                e_str = f'{CURSOR_TOKEN} {e_str}'
-            else:
-                e_str = f'{e_str[0:space_l]} {CURSOR_TOKEN}{e_str[space_l:]}'
-        return e_str
-
-    def postprocess_none(self, e_str, sentence, phrase, c_str, tok):
-        input_str = f'{e_str} {TEXT_SEP_TOKEN} {phrase}'
-        label_str = c_str
-        return self.apply_cursor_rep(input_str, label_str, tok)
-
-    def postprocess_extend(self, e_str, sentence, phrase, c_str, tok, **kwargs):
+    def postprocess_extend(self, data_dict, tok, **kwargs):
         if not hasattr(self, 'extension_strategy'):
             raise ValueError('no sentence extension strategy provided for postprocess_extend')
 
@@ -690,51 +601,73 @@ class EditSamplingStrategy:
         sentences_before = ' '.join(sentences_before[-n_before:]) if n_before != 0 else ''
         sentences_after = ' '.join(sentences_after[:n_after])
 
-        input_str = e_str
-        input_str = f'{sentences_before} {input_str} {sentences_after}'
+        data_dict['input_str'] = f"{sentences_before} {data_dict['e_str']} {sentences_after}"
+        data_dict['cursor_cid'] += len(sentences_before) + 1
         if 'extend_label' in kwargs and kwargs['extend_label']:
-            label_str = f'{sentences_before} {c_str} {sentences_after}'
+            data_dict['label_str'] = f"{sentences_before} {data_dict['c_str']} {sentences_after}"
         else:
-            label_str = f'{c_str}'
+            data_dict['label_str'] = data_dict['c_str']
         
-        input_str = f'{input_str} {TEXT_SEP_TOKEN} {phrase}'
+        data_dict['input_str'] = f"{data_dict['input_str']} {TEXT_SEP_TOKEN} {data_dict['phrase']}"
 
-        return self.apply_cursor_rep(input_str, label_str, tok)
+        data_dict['input_str'] = f"{data_dict['e_str']} {TEXT_SEP_TOKEN} {data_dict['phrase']}"
+        data_dict['label_str'] = data_dict['c_str']
+        return self.apply_cursor_rep(data_dict, tok, **kwargs)
 
-    def postprocess_train(self, e_str, sentence, phrase, c_str, tok, **kwargs):
-        return self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
+    def postprocess_train(self, data_dict, tok, **kwargs):
+        return self.postprocess_inner(data_dict, tok, **kwargs)
 
-    def postprocess_inference(self, e_str, sentence, phrase, c_str, tok, **kwargs):
-        item = self.postprocess_inner(e_str, sentence, phrase, c_str, tok, **kwargs)
-        item['sentence'] = sentence
-        item['part'] = phrase
+    def postprocess_inference(self, data_dict, tok, **kwargs):
+        item = self.postprocess_inner(data_dict, tok, **kwargs)
+        item['sentence'] = data_dict['sentence']
+        item['part'] = data_dict['phrase']
         return item
     
-    def apply_cursor_rep(self, input_str, label_str, tok):
-        if self.cursor_rep == 'naive':
-            return self.apply_naive_cursor(input_str, label_str, tok)
+    def apply_cursor_rep(self, data_dict, tok):
+        if self.cursor_rep is None:
+            return self.apply_none_cursor(data_dict, tok)
+        elif self.cursor_rep == 'naive':
+            return self.apply_naive_cursor(data_dict, tok)
         elif self.cursor_rep == 'mask':
-            return self.apply_mask_cursor(input_str, label_str, tok)
+            return self.apply_mask_cursor(data_dict, tok)
         elif self.cursor_rep == 'token':
-            return self.apply_token_cursor(input_str, label_str, tok)
+            return self.apply_token_cursor(data_dict, tok)
         else:
             raise ValueError(f'invalid cursor representation {self.cursor_rep}')
 
-    def apply_mask_cursor(self, input_str, label_str, tok):
-        input_tokenized = tok.tokenize(input_str)
-        cursor_tok_loc = input_tokenized.index(CURSOR_TOKEN)
-
-        input_arr = input_str.split(' ')
-        input_arr.remove(CURSOR_TOKEN)
-        input_str = ' '.join(input_arr)
+    def apply_mask_cursor(self, data_dict, tok):
+        input_str = data_dict['input_str']
+        label_str = data_dict['label_str']
+        cursor_cid = data_dict['cursor_cid']
 
         source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
-                                max_length=MAX_SOURCE_TOKENS)
+                                max_length=MAX_SOURCE_TOKENS, return_offsets_mapping=True)
+        offsets = source['offset_mapping'].squeeze()
+        prev_tok_end = 0
+        for i in range(len(offsets)):
+            offset = offsets[i]
+            if offset[0] <= cursor_cid and offset[1] > cursor_cid:
+                cursor_tok_loc = i
+                break
+            elif offset[1] == cursor_cid:
+                if i < len(offsets) - 1 and offsets[i + 1][0] == offset[1]:
+                    cursor_tok_loc = [i, i + 1]
+                else:
+                    cursor_tok_loc = i
+            elif cursor_cid < offset[0] and cursor_cid > prev_tok_end:
+                d_left = cursor_cid - prev_tok_end
+                d_right = offset[0] - prev_tok_end
+                if d_left <= d_right:
+                    cursor_tok_loc = i - 1
+                else:
+                    cursor_tok_loc = i
+                break
+            prev_tok_end = offset[1]
 
         label = tok(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
 
         cursor_mask = torch.zeros(size=source['input_ids'].squeeze().size())
-        cursor_mask[cursor_tok_loc] = cursor_mask[cursor_tok_loc - 1] = 1
+        cursor_mask[torch.tensor(cursor_tok_loc, dtype=torch.int)] = 1
 
         item = {
             "input_ids": source['input_ids'].squeeze(),
@@ -752,12 +685,12 @@ class EditSamplingStrategy:
                           item["labels"]]  # we do not wish to include pad tokens when calculating loss
         return item
 
-    def apply_naive_cursor(self, input_str, label_str, tok):
-        input_arr = input_str.split(' ')
-        cursor_loc = input_arr.index(CURSOR_TOKEN)
-        input_arr.remove(CURSOR_TOKEN)
+    def apply_naive_cursor(self, data_dict, tok):
+        input_str = data_dict['input_str']
+        label_str = data_dict['label_str']
+        cursor_cid = data_dict['cursor_cid']
 
-        input_str = ' '.join([f'Error location: {cursor_loc}', *input_arr])
+        input_str = ' '.join([f'Error location: {cursor_cid}.', input_str])
 
         source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
                                 max_length=MAX_SOURCE_TOKENS)
@@ -780,7 +713,42 @@ class EditSamplingStrategy:
                           item["labels"]]  # we do not wish to include pad tokens when calculating loss
         return item
     
-    def apply_token_cursor(self, input_str, label_str, tok):
+    def apply_token_cursor(self, data_dict, tok):
+        cursor_cid = data_dict['cursor_cid']
+        input_str = data_dict['input_str']
+        label_str = data_dict['label_str']
+
+        def snap_cursor(e_str, cursor_cid):
+            # snap to nearest space
+            space_l = cursor_cid
+            if space_l >= len(e_str) and self.log_stuff:
+                print('space_l >= len(e_str)')
+            while space_l != -1 and space_l < len(e_str) and e_str[space_l] != ' ':
+                space_l -= 1
+
+            space_r = cursor_cid
+            if space_r > len(e_str) and self.log_stuff:
+                print('space_r > len(e_str)')
+            if space_r < 0 and self.log_stuff:
+                print('space_r < 0')
+            while space_r != len(e_str) and e_str[space_r] != ' ':
+                space_r += 1
+            return space_l, space_r
+
+        def insert_token(e_str, space_l, space_r):
+            sdist_l, sdist_r = cursor_cid - space_l, space_r - cursor_cid
+            if sdist_r < sdist_l:
+                e_str = f'{e_str[0:space_r]} {CURSOR_TOKEN}{e_str[space_r:]}'
+            else:
+                if space_l == -1:
+                    e_str = f'{CURSOR_TOKEN} {e_str}'
+                else:
+                    e_str = f'{e_str[0:space_l]} {CURSOR_TOKEN}{e_str[space_l:]}'
+            return e_str
+        
+        space_l, space_r = snap_cursor(input_str, cursor_cid)
+        input_str = insert_token(input_str, space_l, space_r)
+
         source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
                                 max_length=MAX_SOURCE_TOKENS)
 
@@ -802,6 +770,30 @@ class EditSamplingStrategy:
                           item["labels"]]  # we do not wish to include pad tokens when calculating loss
         return item
 
+    def apply_none_cursor(self, data_dict, tok):
+        input_str = data_dict['input_str']
+        label_str = data_dict['label_str']
+        source = tok(input_str, padding='max_length', truncation=True, return_tensors='pt',
+                                max_length=MAX_SOURCE_TOKENS)
+
+        label = tok(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
+        
+        
+        item = {
+            "input_ids": source['input_ids'].squeeze(),
+            "labels": label['input_ids'].squeeze(),
+
+            "attention_mask": source['attention_mask'].squeeze(),
+            "decoder_attention_mask": label['attention_mask'].squeeze(),
+
+            "input_str": input_str,
+            "label_str": label_str
+        }
+
+        item["labels"] = [-100 if token == tok.pad_token_id else token for token in
+                          item["labels"]]  # we do not wish to include pad tokens when calculating loss
+        return item
+    
     def filter(self, df: pd.DataFrame):
         df_l_dict = []
         df_r_dict = []
@@ -861,12 +853,12 @@ class EditSamplingStrategy:
             if 'side' not in kwargs:
                 ValueError("must pass 'side' param")
             if kwargs['side'] == 'left':
-                self.add_cursor = self.add_cursor_left
+                self.get_cursor = self.get_cursor_left
             elif kwargs['side'] == 'right':
-                self.add_cursor = self.add_cursor_right
+                self.get_cursor = self.get_cursor_right
             else:
                 ValueError("invalid side")
-        i_sentence = self.add_cursor(e_arr, edits_made)
+        cursor_cid = self.get_cursor(e_arr, edits_made)
 
         if self.log_stuff:
             print('\n')
@@ -882,11 +874,17 @@ class EditSamplingStrategy:
                 self.statistics.num_inversions += 1
 
         self.statistics.word_count_histograms['phrases'][len(i_phrase.split(' '))] += 1
-
-        return i_sentence, sentence, i_phrase, l_sentence
+        data_dict = {
+            'e_str': i_sentence,
+            'c_str': l_sentence,
+            'sentence': sentence,
+            'phrase': i_phrase,
+            'cursor_cid': cursor_cid
+        }
+        return data_dict
 
     def __call__(self, e_str, t_str, edits, tok, **kwargs):
-        return self.postprocess(*self.strategy(e_str, t_str, edits, **kwargs), tok, **kwargs)
+        return self.postprocess(self.strategy(e_str, t_str, edits, **kwargs), tok, **kwargs)
 
 
 class StaticCorrectionDatasetWithEdits(Dataset):
@@ -1516,24 +1514,46 @@ if __name__ == '__main__':
         return T5ForConditionalGeneration.from_pretrained(base_model_name)
 
 
-    def init_tokenizer() -> T5Tokenizer:
-        tokenizer = T5Tokenizer.from_pretrained(base_model_name)
+    def init_tokenizer() -> T5TokenizerFast:
+        tokenizer = T5TokenizerFast.from_pretrained(base_model_name)
         print(f"added {tokenizer.add_special_tokens(custom_special_tokens_dict)} custom special tokens to tokenizer")
         return tokenizer
 
 
     tokenizer = init_tokenizer()
     datasets = {
-        'extend': EditSamplingStrategy(correction_strategy='normal-multiple', 
+        'mask': EditSamplingStrategy(correction_strategy='normal-multiple', 
                                         correction_distrib=(0, 1), 
                                         cursor_strategy='normal', 
                                         cursor_relax=5, 
                                         cursor_rep='mask', 
                                         invert_case_prob=0.5, 
-                                        postprocessor='extend-sentences',
-                                        extension_strategy='left-random',
-                                        left_ext_max=5,
-                                        log_stuff=False) # baseline
+                                        postprocessor='none',
+                                        log_stuff=False),
+        'token': EditSamplingStrategy(correction_strategy='normal-multiple', 
+                                        correction_distrib=(0, 1), 
+                                        cursor_strategy='normal', 
+                                        cursor_relax=5, 
+                                        cursor_rep='token', 
+                                        invert_case_prob=0.5, 
+                                        postprocessor='none',
+                                        log_stuff=False),
+        'naive': EditSamplingStrategy(correction_strategy='normal-multiple', 
+                                        correction_distrib=(0, 1), 
+                                        cursor_strategy='normal', 
+                                        cursor_relax=5, 
+                                        cursor_rep='naive', 
+                                        invert_case_prob=0.5, 
+                                        postprocessor='none',
+                                        log_stuff=False),
+        'none': EditSamplingStrategy(correction_strategy='normal-multiple', 
+                                        correction_distrib=(0, 1), 
+                                        cursor_strategy='none', 
+                                        cursor_relax=5, 
+                                        cursor_rep='naive', 
+                                        invert_case_prob=0.5, 
+                                        postprocessor='none',
+                                        log_stuff=False),
     }
 
     for name, strategy in datasets.items():
@@ -1550,11 +1570,10 @@ if __name__ == '__main__':
             f'|--------------------------- dataset: {name} -----------------------------------|\n'
             f'|-------------------------------------------------------------------------------|\n'
             f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n')
-        for i in tqdm(range(0, len(test_dataset), 100)):
+        for i in tqdm(range(0, len(test_dataset), 60000)):
             item = test_dataset[i]
             input_ids = item['input_ids']
             label_ids = item['labels']
-            cursor_mask = item['cursor_mask']
             idx = 0
             while idx < len(input_ids) and input_ids[idx] != 0:
                 idx += 1
@@ -1569,5 +1588,7 @@ if __name__ == '__main__':
                 print('sssss')
             print(f'input string: {in_str}')
             print(f'label string: {la_str}')
-            print(f'cursor mask: {cursor_mask}')
+            if 'cursor_mask' in item:
+                cursor_mask = item['cursor_mask']
+                print(cursor_mask[:30])
             print()
