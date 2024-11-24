@@ -286,8 +286,12 @@ class EditSamplingStrategy:
             raise ValueError(f"Invalid letter case inversion probability '{self.invert_case_prob}'")
         
         self.postprocesser = postprocessor
+        self.unbounded_cursor = False
         if postprocessor is None or postprocessor == 'none':
             self.postprocess_inner = self.postprocess_none
+        elif postprocessor == 'unbounded-triplets':
+            self.postprocess_inner = self.postprocess_triplets
+            self.unbounded_cursor = True
         elif postprocessor == 'extend-sentences':
             self.postprocess_inner = self.postprocess_extend
         
@@ -493,7 +497,9 @@ class EditSamplingStrategy:
         else:
             # Add a 5-character margin
             str_l = sum(len(word) + 1 for word in e_arr[:e_left])
-            left_b = min(len(e_str), max(0, str_l - self.cursor_relax))
+            left_b = str_l - self.cursor_relax
+            if not self.unbounded_cursor:
+                left_b = min(len(e_str), max(0, left_b))
 
         cursor_cid = left_b
 
@@ -514,7 +520,9 @@ class EditSamplingStrategy:
         else:
             # Add a 5-character margin
             str_r = sum(len(word) + 1 for word in e_arr[:e_right]) - 1
-            right_b = min(len(e_str), str_r + self.cursor_relax)
+            right_b = str_r + self.cursor_relax
+            if not self.unbounded_cursor:
+                right_b = min(len(e_str), right_b)
 
         cursor_cid = right_b
 
@@ -537,8 +545,14 @@ class EditSamplingStrategy:
         else:
             # Add a 5-character margin
             str_l, str_r = sum(len(word) + 1 for word in e_arr[:e_left]), sum(len(word) + 1 for word in e_arr[:e_right]) - 1
-            left_b = min(len(e_str), max(0, str_l - self.cursor_relax))
-            right_b = min(len(e_str), str_r + self.cursor_relax)
+            
+            left_b = str_l - self.cursor_relax
+            if not self.unbounded_cursor:
+                left_b = min(len(e_str), max(0, left_b))
+
+            right_b = str_r + self.cursor_relax
+            if not self.unbounded_cursor:
+                right_b = min(len(e_str), right_b)
 
         if left_b > right_b and self.log_stuff:
             print('left_b > right_b')
@@ -565,14 +579,16 @@ class EditSamplingStrategy:
             # sample cursor location
             str_l, str_r = sum(len(word) + 1 for word in e_arr[:e_left]), sum(len(word) + 1 for word in e_arr[:e_right]) - 1
             str_mid = (str_l + str_r) / 2
-            cursor_cid = min(len(e_str), max(0, (int)(0.5 + random.normalvariate(str_mid, self.cursor_relax))))
+            cursor_cid = (int)(0.5 + random.normalvariate(str_mid, self.cursor_relax))
+            if not self.unbounded_cursor:
+                cursor_cid = min(len(e_str), max(0, cursor_cid))
         
         return cursor_cid
 
     def postprocess_none(self, data_dict, tok, **kwargs):
         data_dict['input_str'] = f"{data_dict['e_str']} {TEXT_SEP_TOKEN} {data_dict['phrase']}"
         data_dict['label_str'] = data_dict['c_str']
-        return self.apply_cursor_rep(data_dict, tok, **kwargs)
+        return self.apply_cursor_rep(data_dict, tok)
 
     def postprocess_extend(self, data_dict, tok, **kwargs):
         if not hasattr(self, 'extension_strategy'):
@@ -601,18 +617,57 @@ class EditSamplingStrategy:
         sentences_before = ' '.join(sentences_before[-n_before:]) if n_before != 0 else ''
         sentences_after = ' '.join(sentences_after[:n_after])
 
-        data_dict['input_str'] = f"{sentences_before} {data_dict['e_str']} {sentences_after}"
-        data_dict['cursor_cid'] += len(sentences_before) + 1
+        data_dict['input_str'] = ' '.join([sentences_before, data_dict['e_str'], sentences_after])
+        if n_before != 0:
+            data_dict['cursor_cid'] += len(sentences_before) + 1
+
         if 'extend_label' in kwargs and kwargs['extend_label']:
-            data_dict['label_str'] = f"{sentences_before} {data_dict['c_str']} {sentences_after}"
+            data_dict['label_str'] = ' '.join([sentences_before, data_dict['c_str'], sentences_after])
         else:
             data_dict['label_str'] = data_dict['c_str']
         
+        data_dict['sentence'] = data_dict['input_str']
+        data_dict['input_str'] = f"{data_dict['input_str']} {TEXT_SEP_TOKEN} {data_dict['phrase']}"
+        return self.apply_cursor_rep(data_dict, tok)
+
+    def postprocess_triplets(self, data_dict, tok, **kwargs):
+
+        sentences_before = kwargs['sentences_before']
+        sentences_after = kwargs['sentences_after']
+        sentences_before = split_into_sentences(sentences_before)
+        sentences_after = split_into_sentences(sentences_after)
+
+        triplet_class = None
+        if data_dict['cursor_cid'] < 0:
+            n_after = 0
+            n_before = 2
+            triplet_class = 'l'
+        elif data_dict['cursor_cid'] > len(data_dict['e_str']):
+            n_after = 2
+            n_before = 0
+            triplet_class = 'r'
+        else:
+            n_after = 1
+            n_before = 1
+            triplet_class = 'm'
+
+        sentences_before = ' '.join(sentences_before[-n_before:]) if n_before != 0 else ''
+        sentences_after = ' '.join(sentences_after[:n_after])
+
+        data_dict['input_str'] = ' '.join([sentences_before, data_dict['e_str'], sentences_after])
+        if n_before != 0:
+            data_dict['cursor_cid'] += len(sentences_before) + 1
+        data_dict['cursor_cid'] = max(0, min(len(data_dict['input_str']), data_dict['cursor_cid']))
+
+        if 'extend_label' in kwargs and kwargs['extend_label']:
+            data_dict['label_str'] = ' '.join([sentences_before, data_dict['c_str'], sentences_after])
+        else:
+            data_dict['label_str'] = data_dict['c_str']
+        
+        data_dict['sentence'] = data_dict['input_str']
         data_dict['input_str'] = f"{data_dict['input_str']} {TEXT_SEP_TOKEN} {data_dict['phrase']}"
 
-        data_dict['input_str'] = f"{data_dict['e_str']} {TEXT_SEP_TOKEN} {data_dict['phrase']}"
-        data_dict['label_str'] = data_dict['c_str']
-        return self.apply_cursor_rep(data_dict, tok, **kwargs)
+        return {**self.apply_cursor_rep(data_dict, tok), 'triplet_class': triplet_class}
 
     def postprocess_train(self, data_dict, tok, **kwargs):
         return self.postprocess_inner(data_dict, tok, **kwargs)
@@ -1006,6 +1061,172 @@ class CorrectionDatasetWithEdits(Dataset):
         if self.one_draw:
             self.item_mem.append(item)
 
+        return item
+
+class TripletCorrectionDatasetWithEditsGenerator(Dataset):
+    
+    def __init__(self,
+                 data_path,
+                 tokenizer,
+                 sampling_strategy: EditSamplingStrategy,
+                 extend_label=True,
+                 scale=1,
+                 random_state=None,
+                 one_draw=False
+                 ):
+        print(f'preparing data from {data_path} ... \n\t', end='')
+
+        print('reading data ... ', end='')
+        self.df = pd.read_csv(data_path)
+
+        print('parsing literals ... ', end='')
+        self.df['edits'] = self.df['edits'].apply(ast.literal_eval)
+
+        print('sampling ... ')
+        self.df = self.df.sample(frac=scale, random_state=random_state).reset_index(drop=True)
+
+        # set tokenizer
+        self.tokenizer = tokenizer
+        self.sampling_strategy = sampling_strategy
+        self.extend_label = extend_label
+
+        if sampling_strategy.cursor_strategy != 'uniform':
+            raise ValueError('non-uniform cursor sampling not supported for triplet dataset')
+        if sampling_strategy.postprocesser != 'unbounded-triplets':
+            raise ValueError('non-triplet sampling strategy postprocessor incompatible with triplet dataset')
+        if sampling_strategy.postprocess != sampling_strategy.postprocess_inference:
+            raise ValueError('sampling must be in inference mode for triplet dataset generation')
+        
+        self.one_draw = one_draw
+        self.item_mem = [] if one_draw else None
+
+        print('done')
+            
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        # return remembered item
+        if self.one_draw and len(self.item_mem) == len(self):
+            return self.item_mem[idx]
+        
+        # add item, remember item, and return item
+        strategy_kwargs = {}
+        row = self.df.iloc[idx]
+        strategy_kwargs.update({'sentences_before': row['sentences_before'], 
+                                'sentences_after': row['sentences_after'],
+                                'extend_label': self.extend_label})
+
+        item = self.sampling_strategy(row['error_sentence'], row['target_sentence'], row['edits'], self.tokenizer, **strategy_kwargs)
+
+        return item
+    
+    def generate_dataset(self, min_classcounts: dict, dpath):
+        dataset_mem = []
+        classcounts = {key: 0 for key, _ in min_classcounts.items()}
+        i = 0
+        while True:
+            roundID = i / self.__len__()
+            origID = i % self.__len__()
+            item = self.__getitem__(origID)
+
+            dataset_row = {'input_str': item['input_str'], 
+                           'label_str': item['label_str'], 
+                           'sentence': item['sentence'],
+                           'part': item['part'],
+                           'triplet_class': item['triplet_class'],
+                           'roundID': roundID,
+                           'origID': origID}
+
+            if self.sampling_strategy.cursor_rep == 'mask':
+                dataset_row['cursor_tok_loc'] = int(torch.argmax(item['cursor_mask']).item())
+
+            dataset_mem.append(dataset_row)
+            classcounts[item['triplet_class']] += 1
+
+            if all([count >= mincount for count, mincount in zip(classcounts.values(), min_classcounts.values())]):
+                print(f'\n\nclasscounts:\n{classcounts}\nmin_classcounts:\n{min_classcounts}')
+                break
+            
+            i += 1
+
+        df = pd.DataFrame(dataset_mem)
+        df.to_csv(dpath, index=False)
+
+class TripletCorrectionDatasetWithEdits(Dataset):
+    
+    def __init__(self,
+                 data_path,
+                 tokenizer,
+                 triplet_classes,
+                 scale=1,
+                 random_state=None
+                 ):
+        print(f'preparing data from {data_path} ... \n\t', end='')
+
+        print('reading data ... ', end='')
+        self.df = pd.read_csv(data_path)
+
+        print('filtering triplet classes...', end='')
+        if isinstance(triplet_classes, str):
+            self.triplet_classes = [triplet_classes]
+        elif isinstance(triplet_classes, list):
+            self.triplet_classes = triplet_classes
+        else:
+            raise ValueError('invalid triplet classes for dataset')
+        
+        grouped = self.df.groupby(by='triplet_class')
+
+        print(f'original len: {len(self.df)}')
+        self.df = pd.concat([grouped.get_group(g) for g in grouped.groups if g in triplet_classes])
+        print(f'updated len: {len(self.df)}')
+
+
+        print('sampling ... ')
+        self.df = self.df.sample(frac=scale, random_state=random_state).reset_index(drop=True)
+
+        # set tokenizer
+        self.tokenizer = tokenizer
+
+        print('done')
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        # create item, remember item, and return item
+        row = self.df.iloc[idx]
+        
+        input_str = row['input_str']
+        label_str = row['label_str']
+        cursor_tok_loc = row['cursor_tok_loc']
+
+        source = self.tokenizer(input_str, padding='max_length', truncation=True, return_tensors='pt',
+                                max_length=MAX_SOURCE_TOKENS, return_offsets_mapping=True)
+
+        label = self.tokenizer(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
+
+        cursor_mask = torch.zeros(size=source['input_ids'].squeeze().size())
+        cursor_mask[torch.tensor(cursor_tok_loc, dtype=torch.int)] = 1
+
+        item = {
+            "input_ids": source['input_ids'].squeeze(),
+            "labels": label['input_ids'].squeeze(),
+
+            "attention_mask": source['attention_mask'].squeeze(),
+            "decoder_attention_mask": label['attention_mask'].squeeze(),
+            "cursor_mask": cursor_mask,
+
+            "input_str": input_str,
+            "label_str": label_str,
+
+            "sentence": row['sentence'],
+            "part": row['part']
+        }
+
+        item["labels"] = [-100 if token == self.tokenizer.pad_token_id else token for token in
+                          item["labels"]]  # we do not wish to include pad tokens when calculating loss
         return item
 
 
@@ -1503,10 +1724,9 @@ if __name__ == '__main__':
     LEARNING_RATE = 5e-5  # learning rate
     WEIGHT_DECAY = 0.001  # weight decay
 
-    PORTION = 1  # proportion of datasets to use (note: applies to each split)
+    PORTION = 0.0001  # proportion of datasets to use (note: applies to each split)
 
     custom_special_tokens_dict = {'additional_special_tokens': [CURSOR_TOKEN, TEXT_SEP_TOKEN]}
-
 
     def init_model() -> T5ForConditionalGeneration:
         model = T5ForConditionalGeneration.from_pretrained(base_model_name)
@@ -1522,37 +1742,14 @@ if __name__ == '__main__':
 
     tokenizer = init_tokenizer()
     datasets = {
-        'mask': EditSamplingStrategy(correction_strategy='normal-multiple', 
+        'point mask triplets': EditSamplingStrategy(correction_strategy='normal-multiple', 
                                         correction_distrib=(0, 1), 
-                                        cursor_strategy='normal', 
-                                        cursor_relax=5, 
+                                        cursor_strategy='uniform', 
+                                        cursor_relax=25, 
                                         cursor_rep='mask', 
                                         invert_case_prob=0.5, 
-                                        postprocessor='none',
-                                        log_stuff=False),
-        'token': EditSamplingStrategy(correction_strategy='normal-multiple', 
-                                        correction_distrib=(0, 1), 
-                                        cursor_strategy='normal', 
-                                        cursor_relax=5, 
-                                        cursor_rep='token', 
-                                        invert_case_prob=0.5, 
-                                        postprocessor='none',
-                                        log_stuff=False),
-        'naive': EditSamplingStrategy(correction_strategy='normal-multiple', 
-                                        correction_distrib=(0, 1), 
-                                        cursor_strategy='normal', 
-                                        cursor_relax=5, 
-                                        cursor_rep='naive', 
-                                        invert_case_prob=0.5, 
-                                        postprocessor='none',
-                                        log_stuff=False),
-        'none': EditSamplingStrategy(correction_strategy='normal-multiple', 
-                                        correction_distrib=(0, 1), 
-                                        cursor_strategy='none', 
-                                        cursor_relax=5, 
-                                        cursor_rep='naive', 
-                                        invert_case_prob=0.5, 
-                                        postprocessor='none',
+                                        postprocessor='unbounded-triplets',
+                                        inference=True,
                                         log_stuff=False),
     }
 
@@ -1560,8 +1757,16 @@ if __name__ == '__main__':
         sampling_strategy = strategy
         # train_dataset = CorrectionDatasetWithEdits(f'{data_dir}train_data.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
         # val_dataset = CorrectionDatasetWithEdits(f'{data_dir}val_data.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
-        test_dataset = CorrectionDatasetWithEdits(f'{data_dir}all_data_with_context.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
-
+        test_dataset = TripletCorrectionDatasetWithEditsGenerator(f'{data_dir}all_data_with_context.csv', tokenizer=tokenizer, sampling_strategy=sampling_strategy, scale=PORTION)
+        test_dataset.generate_dataset(
+            min_classcounts={'l': 100, 'm': 2250, 'r': 100},
+            dpath=r't.csv'
+        )
+        test_dataset = TripletCorrectionDatasetWithEdits(
+            data_path=r't.csv',
+            tokenizer=tokenizer,
+            triplet_classes=['l', 'r']
+        )
         print(f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n'
             f'|-------------------------------------------------------------------------------|\n'
             f'|-------------------------------------------------------------------------------|\n'
@@ -1570,7 +1775,7 @@ if __name__ == '__main__':
             f'|--------------------------- dataset: {name} -----------------------------------|\n'
             f'|-------------------------------------------------------------------------------|\n'
             f'|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||\n')
-        for i in tqdm(range(0, len(test_dataset), 60000)):
+        for i in tqdm(range(0, len(test_dataset), 20)):
             item = test_dataset[i]
             input_ids = item['input_ids']
             label_ids = item['labels']
@@ -1586,9 +1791,15 @@ if __name__ == '__main__':
             la_str = tokenizer.decode(label_ids)
             if TEXT_SEP_TOKEN not in in_str:
                 print('sssss')
+            
+            if 'triplet_class' in item:
+                print(f"triplet class: {item['triplet_class']}")
             print(f'input string: {in_str}')
             print(f'label string: {la_str}')
-            if 'cursor_mask' in item:
-                cursor_mask = item['cursor_mask']
-                print(cursor_mask[:30])
+            #if 'cursor_mask' in item:
+            #    cursor_mask = item['cursor_mask']
+            #    print(cursor_mask[:30])
             print()
+        
+        #dataset_mem = pd.DataFrame(test_dataset.dataset_mem)
+        #dataset_mem.to_csv('t.csv', index=False)
