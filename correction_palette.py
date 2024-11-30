@@ -150,16 +150,21 @@ def custom_data_collator(features) -> Dict[str, Any]:
 
     # Handling of all other possible keys.
     # Again, we will use the first element to figure out which key/values are not None for this model.
-    for k, v in first.items():
-        if k not in ("label", "label_ids") and v is not None:
-            if isinstance(v, torch.Tensor):
-                batch[k] = torch.stack([f[k] for f in features])
-            elif isinstance(v, np.ndarray):
-                batch[k] = torch.tensor(np.stack([f[k] for f in features]))
-            elif isinstance(v, str):
-                batch[k] = [f[k] for f in features]
-            else:
-                batch[k] = torch.tensor([f[k] for f in features])
+    try:
+        for k, v in first.items():
+            if k not in ("label", "label_ids") and v is not None:
+                if isinstance(v, torch.Tensor):
+                    batch[k] = torch.stack([f[k] for f in features])
+                elif isinstance(v, np.ndarray):
+                    batch[k] = torch.tensor(np.stack([f[k] for f in features]))
+                elif isinstance(v, str):
+                    batch[k] = [f[k] for f in features]
+                else:
+                    batch[k] = torch.tensor([f[k] for f in features])
+    except Exception as e:
+        print(features)
+        print(f"An error occurred: {e}")
+        raise
 
     return batch
 
@@ -617,12 +622,17 @@ class EditSamplingStrategy:
         sentences_before = ' '.join(sentences_before[-n_before:]) if n_before != 0 else ''
         sentences_after = ' '.join(sentences_after[:n_after])
 
-        data_dict['input_str'] = ' '.join([sentences_before, data_dict['e_str'], sentences_after])
+        if sentences_after != '':
+            sentences_after = ' ' + sentences_after
+        if sentences_before != '':
+            sentences_before = sentences_before + ' '
+
+        data_dict['input_str'] = ''.join([sentences_before, data_dict['e_str'], sentences_after])
         if n_before != 0:
-            data_dict['cursor_cid'] += len(sentences_before) + 1
+            data_dict['cursor_cid'] += len(sentences_before)
 
         if 'extend_label' in kwargs and kwargs['extend_label']:
-            data_dict['label_str'] = ' '.join([sentences_before, data_dict['c_str'], sentences_after])
+            data_dict['label_str'] = ''.join([sentences_before, data_dict['c_str'], sentences_after])
         else:
             data_dict['label_str'] = data_dict['c_str']
         
@@ -654,13 +664,18 @@ class EditSamplingStrategy:
         sentences_before = ' '.join(sentences_before[-n_before:]) if n_before != 0 else ''
         sentences_after = ' '.join(sentences_after[:n_after])
 
-        data_dict['input_str'] = ' '.join([sentences_before, data_dict['e_str'], sentences_after])
+        if sentences_after != '':
+            sentences_after = ' ' + sentences_after
+        if sentences_before != '':
+            sentences_before = sentences_before + ' '
+
+        data_dict['input_str'] = ''.join([sentences_before, data_dict['e_str'], sentences_after])
         if n_before != 0:
-            data_dict['cursor_cid'] += len(sentences_before) + 1
+            data_dict['cursor_cid'] += len(sentences_before)
         data_dict['cursor_cid'] = max(0, min(len(data_dict['input_str']), data_dict['cursor_cid']))
 
         if 'extend_label' in kwargs and kwargs['extend_label']:
-            data_dict['label_str'] = ' '.join([sentences_before, data_dict['c_str'], sentences_after])
+            data_dict['label_str'] = ''.join([sentences_before, data_dict['c_str'], sentences_after])
         else:
             data_dict['label_str'] = data_dict['c_str']
         
@@ -676,6 +691,8 @@ class EditSamplingStrategy:
         item = self.postprocess_inner(data_dict, tok, **kwargs)
         item['sentence'] = data_dict['sentence']
         item['part'] = data_dict['phrase']
+        item['edits'] = data_dict['edits']
+        item['edits_made'] = data_dict['edits_made']
         return item
     
     def apply_cursor_rep(self, data_dict, tok):
@@ -934,7 +951,9 @@ class EditSamplingStrategy:
             'c_str': l_sentence,
             'sentence': sentence,
             'phrase': i_phrase,
-            'cursor_cid': cursor_cid
+            'cursor_cid': cursor_cid,
+            'edits_made': f'{edits_made}',
+            'edits': f'{edits}'
         }
         return data_dict
 
@@ -1130,6 +1149,33 @@ class TripletCorrectionDatasetWithEditsGenerator(Dataset):
             roundID = i / self.__len__()
             origID = i % self.__len__()
             item = self.__getitem__(origID)
+            input_str = item['input_str']
+            label_str = item['label_str']
+
+            source = self.tokenizer(input_str,
+                                    padding='max_length',
+                                    truncation=True,
+                                    return_tensors='pt',
+                                    max_length=MAX_SOURCE_TOKENS,
+                                    return_offsets_mapping=True)
+            if source['input_ids'].shape[1] > MAX_SOURCE_TOKENS:
+                print(f"ERROR: Source tensor size ({source['input_ids'].shape[1]}) exceeds MAX_SOURCE_TOKENS ({MAX_SOURCE_TOKENS})")
+                print(f"Source string: {input_str}")
+                print(f"Tokenized source: {self.tokenizer.decode(source['input_ids'][0])}")
+                continue
+
+            label = self.tokenizer(label_str,
+                                padding='max_length',
+                                truncation=True,
+                                return_tensors='pt',
+                                max_length=MAX_NEW_TOKENS)
+
+            # Check label tensor size
+            if label['input_ids'].shape[1] > MAX_NEW_TOKENS:
+                print(f"ERROR: Label tensor size ({label['input_ids'].shape[1]}) exceeds MAX_NEW_TOKENS ({MAX_NEW_TOKENS})")
+                print(f"Label string: {label_str}")
+                print(f"Tokenized label: {self.tokenizer.decode(label['input_ids'][0])}")
+                continue
 
             dataset_row = {'input_str': item['input_str'], 
                            'label_str': item['label_str'], 
@@ -1141,6 +1187,9 @@ class TripletCorrectionDatasetWithEditsGenerator(Dataset):
 
             if self.sampling_strategy.cursor_rep == 'mask':
                 dataset_row['cursor_tok_loc'] = int(torch.argmax(item['cursor_mask']).item())
+
+            dataset_row['edits_made'] = item['edits_made'] if 'edits_made' in item.keys() else None
+            dataset_row['edits'] = item['edits'] if 'edits' in item.keys() else None
 
             dataset_mem.append(dataset_row)
             classcounts[item['triplet_class']] += 1
@@ -1161,7 +1210,8 @@ class TripletCorrectionDatasetWithEdits(Dataset):
                  tokenizer,
                  triplet_classes,
                  scale=1,
-                 random_state=None
+                 random_state=None,
+                 inference = True
                  ):
         print(f'preparing data from {data_path} ... \n\t', end='')
 
@@ -1182,13 +1232,18 @@ class TripletCorrectionDatasetWithEdits(Dataset):
         self.df = pd.concat([grouped.get_group(g) for g in grouped.groups if g in triplet_classes])
         print(f'updated len: {len(self.df)}')
 
+        self.df.replace('', np.nan, inplace=True)
+
+        # Drop rows with any NaN values
+        self.df = self.df.dropna()
+        print(f'updated len after dropping nan: {len(self.df)}')
 
         print('sampling ... ')
         self.df = self.df.sample(frac=scale, random_state=random_state).reset_index(drop=True)
 
         # set tokenizer
         self.tokenizer = tokenizer
-
+        self.inference = inference
         print('done')
 
     def __len__(self):
@@ -1202,10 +1257,30 @@ class TripletCorrectionDatasetWithEdits(Dataset):
         label_str = row['label_str']
         cursor_tok_loc = row['cursor_tok_loc']
 
-        source = self.tokenizer(input_str, padding='max_length', truncation=True, return_tensors='pt',
-                                max_length=MAX_SOURCE_TOKENS, return_offsets_mapping=True)
+        source = self.tokenizer(input_str,
+                                padding='max_length',
+                                truncation=True,
+                                return_tensors='pt',
+                                max_length=MAX_SOURCE_TOKENS,
+                                return_offsets_mapping=True)
+        if source['input_ids'].shape[1] > MAX_SOURCE_TOKENS:
+            print(f"ERROR: Source tensor size ({source['input_ids'].shape[1]}) exceeds MAX_SOURCE_TOKENS ({MAX_SOURCE_TOKENS})")
+            print(f"Source string: {input_str}")
+            print(f"Tokenized source: {self.tokenizer.decode(source['input_ids'][0])}")
+            raise ValueError(f"Source tensor size ({source['input_ids'].shape[1]}) exceeds MAX_SOURCE_TOKENS ({MAX_SOURCE_TOKENS})")
 
-        label = self.tokenizer(label_str, padding='max_length', truncation=True, return_tensors='pt', max_length=MAX_NEW_TOKENS)
+        label = self.tokenizer(label_str,
+                               padding='max_length',
+                               truncation=True,
+                               return_tensors='pt',
+                               max_length=MAX_NEW_TOKENS)
+
+        # Check label tensor size
+        if label['input_ids'].shape[1] > MAX_NEW_TOKENS:
+            print(f"ERROR: Label tensor size ({label['input_ids'].shape[1]}) exceeds MAX_NEW_TOKENS ({MAX_NEW_TOKENS})")
+            print(f"Label string: {label_str}")
+            print(f"Tokenized label: {self.tokenizer.decode(label['input_ids'][0])}")
+            raise ValueError(f"Label tensor size ({label['input_ids'].shape[1]}) exceeds MAX_NEW_TOKENS ({MAX_NEW_TOKENS})")
 
         cursor_mask = torch.zeros(size=source['input_ids'].squeeze().size())
         cursor_mask[torch.tensor(cursor_tok_loc, dtype=torch.int)] = 1
@@ -1219,11 +1294,13 @@ class TripletCorrectionDatasetWithEdits(Dataset):
             "cursor_mask": cursor_mask,
 
             "input_str": input_str,
-            "label_str": label_str,
-
-            "sentence": row['sentence'],
-            "part": row['part']
+            "label_str": label_str
         }
+        if self.inference:
+            item['sentence'] = row['sentence']
+            item["part"] = row['part']
+            item['edits']=row['edits']
+            item['edits_made']=row['edits_made']
 
         item["labels"] = [-100 if token == self.tokenizer.pad_token_id else token for token in
                           item["labels"]]  # we do not wish to include pad tokens when calculating loss
@@ -1318,7 +1395,7 @@ class EarlyStoppingSeq2SeqTrainer(Seq2SeqTrainer):
             self._signature_columns = list(signature.parameters.keys())
             # Labels may be named label or label_ids, the default data collator handles that.
             self._signature_columns += list(set(["label", "label_ids"] + self.label_names))
-            self._signature_columns += ["sentence", "part"]
+            self._signature_columns += ["sentence", "part", "edits", "edits_made"]
 
     def evaluation_loop(
             self,
@@ -1402,7 +1479,9 @@ class EarlyStoppingSeq2SeqTrainer(Seq2SeqTrainer):
         for step, _inputs in enumerate(dataloader):
             # set copy of inputs
             inputs = {k: v for k, v in _inputs.items()}
-            all_inputs_strs += [(sentence, part) for sentence, part in zip(inputs.pop('sentence'), inputs.pop('part'))]
+            all_inputs_strs += [(sentence, part, edits, edits_made) for sentence, part, edits, edits_made
+                                in zip(inputs.pop('sentence'), inputs.pop('part'),
+                                       inputs.pop('edits'),inputs.pop('edits_made'))]
 
             # Update the observed num examples
             observed_batch_size = find_batch_size(inputs)
@@ -1794,8 +1873,9 @@ if __name__ == '__main__':
             
             if 'triplet_class' in item:
                 print(f"triplet class: {item['triplet_class']}")
-            print(f'input string: {in_str}')
-            print(f'label string: {la_str}')
+            print(f'input string: |{in_str}|')
+            print(f'label string: |{la_str}|')
+            print(f"input strings: |{item['sentence']}|, |{item['part']}|")
             #if 'cursor_mask' in item:
             #    cursor_mask = item['cursor_mask']
             #    print(cursor_mask[:30])
