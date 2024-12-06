@@ -1662,8 +1662,13 @@ class EarlyStoppingSeq2SeqTrainer(Seq2SeqTrainer):
             self.model.generation_config._from_model_config = False
 
         gen_config = self.model.generation_config
-        if generated_tokens.shape[-1] < self.gen_kwargs_override['max_new_tokens']:
-            generated_tokens = self._pad_tensors_to_max_len(generated_tokens, self.gen_kwargs_override['max_new_tokens'])
+        if 'max_new_tokens' in self.gen_kwargs_override:
+            max_new_tokens = self.gen_kwargs_override['max_new_tokens']
+            if generated_tokens.shape[-1] < max_new_tokens:
+                generated_tokens = self._pad_tensors_to_max_len(generated_tokens, max_new_tokens)
+            else:
+                print(f"WARNING: Generated tokens length ({generated_tokens.shape[-1]}) exceeds max_new_tokens ({max_new_tokens}), truncating")
+                generated_tokens = generated_tokens[:, :max_new_tokens]
         elif generated_tokens.shape[-1] < gen_config.max_length:
             generated_tokens = self._pad_tensors_to_max_len(generated_tokens, gen_config.max_length)
         elif gen_config.max_new_tokens is not None and generated_tokens.shape[-1] < gen_config.max_new_tokens + 1:
