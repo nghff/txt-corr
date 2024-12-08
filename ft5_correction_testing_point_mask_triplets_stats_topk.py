@@ -467,7 +467,7 @@ def compute_stats(input_info, predictions, labels):
     i=0
     for preds, label_str, (_, part, edits, edits_made) in zip(predictions, labels,
                                                     input_info):
-        words_in_part = part.split()
+        words_in_part = part.split(' ') #count empty strings as words
         part_word_count = len(words_in_part)
         edits = ast.literal_eval(edits)
         edit_count = len(edits)
